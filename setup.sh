@@ -69,15 +69,25 @@ say "Setting WARP to proxy mode on 127.0.0.1:${PORT} (no route changes)"
 warp-cli --accept-tos mode proxy
 warp-cli --accept-tos set-mode proxy 2>/dev/null || true
 warp-cli --accept-tos connect >/dev/null
-# NOTE: use an 'if' rather than `... && break` -- under `set -e` an AND-list
-# whose left side fails returns non-zero as the loop body's last command and
-# aborts the whole script the first time status is still "Connecting".
+# Two traps avoided here, both of which made this check report failure while
+# WARP was in fact connected:
+#
+#  1. `cmd | grep -q X && break` under `set -e`: when status is still
+#     "Connecting" the AND-list returns non-zero as the loop body's last
+#     command, aborting the whole script.
+#
+#  2. `cmd | grep -q X` under `set -o pipefail`: grep -q exits as soon as it
+#     matches, warp-cli then dies on SIGPIPE, and pipefail propagates that
+#     non-zero -- so the `if` sees a FALSE even on an exact match.
+#
+# So: capture the output first and match it with `case`. No pipeline, no
+# pipefail, no early-exit, no SIGPIPE.
 connected=0
 for _ in $(seq 1 30); do
-  if warp-cli --accept-tos status 2>&1 | grep -q Connected; then
-    connected=1
-    break
-  fi
+  _status="$(warp-cli --accept-tos status 2>&1 || true)"
+  case "$_status" in
+    *Connected*) connected=1; break ;;
+  esac
   sleep 2
 done
 if [ "$connected" -eq 1 ]; then
