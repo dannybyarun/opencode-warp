@@ -1,87 +1,139 @@
 #!/usr/bin/env bash
 #
-# setup.sh - install Cloudflare WARP (proxy mode) and the `opencode --stand`
-#            shortcut on a Debian/Ubuntu machine.
+# setup.sh - install Cloudflare WARP (proxy mode), opencode if missing, and
+#            the `opencode --stand` shortcut.
 #
-# What this does:
-#   1. adds Cloudflare's apt repo + keyring
-#   2. installs cloudflare-warp
-#   3. registers an ANONYMOUS device (no email, no account login)
-#   4. sets WARP to *proxy* mode on 127.0.0.1:40000  (does NOT hijack routes)
-#   5. installs /usr/local/bin/opencode-warp
-#   6. adds the `opencode()` function to ~/.bashrc
-#   7. verifies end to end
+# Supported distros (official Cloudflare packages):
+#   - Debian / Ubuntu / Raspbian              -> .deb
+#   - RHEL / Rocky / Alma / CentOS / Fedora   -> .rpm
+#     / Oracle Linux
 #
-# Idempotent: safe to re-run. Existing registration/config is left in place.
+# Hard requirements: root, /dev/net/tun, systemd as PID 1. Containers almost
+# always lack one or both, so they are rejected with an explanation rather
+# than failing halfway through.
+#
+# Idempotent: safe to re-run.
 #
 set -euo pipefail
 
 PORT="${WARP_PROXY_PORT:-40000}"
 PROXY="http://127.0.0.1:${PORT}"
+OPENCODE_INSTALL_URL="https://opencode.ai/install"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 say()  { printf '\n==> %s\n' "$*"; }
 ok()   { printf '    ok: %s\n' "$*"; }
-warn() { printf '    !  %s\n' "$*" >&2; }
+die()  { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 
-# ---------------------------------------------------------------- preflight
-[ "$(id -u)" -eq 0 ] || { printf 're-run as root (sudo ./setup.sh)\n' >&2; exit 1; }
+[ "$(id -u)" -eq 0 ] || die "re-run as root (sudo ./setup.sh)"
 export DEBIAN_FRONTEND=noninteractive
 
-command -v curl  >/dev/null || { printf 'curl is required\n' >&2; exit 1; }
-command -v gpg   >/dev/null || { printf 'gnupg is required (apt install gnupg)\n' >&2; exit 1; }
+command -v curl >/dev/null || die "curl is required"
+command -v gpg  >/dev/null || die "gnupg is required (apt install gnupg / dnf install gnupg2)"
 
-if ! command -v opencode >/dev/null 2>&1 && [ ! -x "$HOME/.opencode/bin/opencode" ]; then
-  warn "opencode not found on PATH or in ~/.opencode/bin."
-  warn "The wrapper will be installed anyway; it resolves the binary at runtime."
+# ------------------------------------------------------------- environment
+say "Checking environment"
+[ -e /dev/net/tun ] \
+  && ok "/dev/net/tun present" \
+  || die "/dev/net/tun is missing.
+  WARP needs a TAP/TUN device. In a container this usually means it was not
+  created with --device /dev/net/tun (and --cap-add NET_ADMIN). This tool is
+  unlikely to work inside a container."
+
+PID1="$(cat /proc/1/comm 2>/dev/null || echo unknown)"
+if [ "$PID1" != "systemd" ]; then
+  die "PID 1 is '$PID1', not systemd.
+  warp-svc is a systemd service; WARP will not start without systemd.
+  Use a VM or a systemd-enabled container."
+fi
+ok "systemd is PID 1"
+
+if [ -e /.dockerenv ] || [ -e /run/.containerenv ] \
+   || grep -qaE 'docker|lxc|kubepods|containerd' /proc/1/cgroup 2>/dev/null; then
+  printf '    !  container detected - continuing because tun+systemd both passed,\n'
+  printf '       but expect this to be unusual.\n'
 fi
 
-CODENAME="$(. /etc/os-release 2>/dev/null && echo "${VERSION_CODENAME:-}")"
-[ -n "$CODENAME" ] || CODENAME="$(lsb_release -cs 2>/dev/null || echo jammy)"
+# --------------------------------------------------------- distro detection
+say "Detecting distro"
+FAMILY=""
+if [ -r /etc/os-release ]; then
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  _probe=" ${ID:-} ${ID_LIKE:-} "
+  case "$_probe" in
+    *debian*|*ubuntu*|*raspbian*) FAMILY=deb ;;
+    *rhel*|*fedora*|*centos*|*rocky*|*almalinux*|*" oracle "*) FAMILY=rpm ;;
+  esac
+  ok "ID=${ID:-?} ID_LIKE=${ID_LIKE:-<none>} -> family=${FAMILY:-unsupported}"
+else
+  die "/etc/os-release not readable; cannot detect distro"
+fi
 
-# ---------------------------------------------------------- 1+2. apt repo
-say "Installing Cloudflare WARP (codename: ${CODENAME})"
-install -d -m 0755 /usr/share/keyrings
-curl -fsSL --max-time 60 https://pkg.cloudflareclient.com/pubkey.gpg \
-  | gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${CODENAME} main" \
-  > /etc/apt/sources.list.d/cloudflare-client.list
-apt-get update -qq
-apt-get install -y -qq cloudflare-warp
-ok "cloudflare-warp $(warp-cli --version 2>/dev/null | head -1)"
+[ -n "$FAMILY" ] || die "Unsupported distro ('${ID:-unknown}').
+  Official packages exist only for Debian/Ubuntu (.deb) and RHEL-family (.rpm).
+  On Arch/openSUSE/Alpine/macOS/Windows, install Cloudflare WARP yourself,
+  ensure it is in proxy mode on 127.0.0.1:${PORT}, then run:
+      ./setup.sh --skip-warp-package"
 
-# --------------------------------------------------------------- 3. service
+SKIP_PACKAGE=0
+[ "${1:-}" = "--skip-warp-package" ] && SKIP_PACKAGE=1
+
+# ------------------------------------------------------------ WARP package
+if [ "$SKIP_PACKAGE" -eq 0 ]; then
+  if [ "$FAMILY" = "deb" ]; then
+    say "Installing Cloudflare WARP (.deb)"
+    install -d -m 0755 /usr/share/keyrings
+    curl -fsSL --max-time 60 https://pkg.cloudflareclient.com/pubkey.gpg \
+      | gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+    CODENAME="${VERSION_CODENAME:-$(lsb_release -cs 2>/dev/null || echo stable)}"
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${CODENAME} main" \
+      > /etc/apt/sources.list.d/cloudflare-client.list
+    apt-get update -qq
+    apt-get install -y -qq cloudflare-warp
+  else
+    say "Installing Cloudflare WARP (.rpm)"
+    curl -fsSL --max-time 60 https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo \
+      -o /etc/yum.repos.d/cloudflare-warp.repo
+    if command -v dnf >/dev/null; then dnf install -y -q cloudflare-warp
+    else yum install -y -q cloudflare-warp
+    fi
+  fi
+  ok "installed: $(warp-cli --version 2>/dev/null | head -1)"
+else
+  say "Skipping WARP package install (--skip-warp-package)"
+fi
+
+command -v warp-cli >/dev/null || die "warp-cli not found on PATH"
+
+# ------------------------------------------------------------------ service
 say "Starting warp-svc"
 systemctl enable --now warp-svc >/dev/null 2>&1 || systemctl start warp-svc
 sleep 2
-systemctl is-active --quiet warp-svc && ok "warp-svc active" || { warn "warp-svc failed to start"; exit 1; }
+systemctl is-active --quiet warp-svc && ok "warp-svc active" || die "warp-svc failed to start"
 
-# --------------------------------------------------- 4. register + proxy mode
+# ------------------------------------------------------- register + proxy mode
 say "Registering device (anonymous, no email/account)"
 if warp-cli --accept-tos registration show >/dev/null 2>&1; then
   ok "already registered - leaving existing registration intact"
 else
-  warp-cli --accept-tos registration new
+  warp-cli --accept-tos registration new >/dev/null
   ok "registered"
 fi
 
 say "Setting WARP to proxy mode on 127.0.0.1:${PORT} (no route changes)"
-warp-cli --accept-tos mode proxy
-warp-cli --accept-tos set-mode proxy 2>/dev/null || true
-warp-cli --accept-tos connect >/dev/null
-# Two traps avoided here, both of which made this check report failure while
-# WARP was in fact connected:
-#
-#  1. `cmd | grep -q X && break` under `set -e`: when status is still
-#     "Connecting" the AND-list returns non-zero as the loop body's last
-#     command, aborting the whole script.
-#
-#  2. `cmd | grep -q X` under `set -o pipefail`: grep -q exits as soon as it
-#     matches, warp-cli then dies on SIGPIPE, and pipefail propagates that
-#     non-zero -- so the `if` sees a FALSE even on an exact match.
-#
-# So: capture the output first and match it with `case`. No pipeline, no
-# pipefail, no early-exit, no SIGPIPE.
+warp-cli --accept-tos mode proxy >/dev/null 2>&1 || true
+warp-cli --accept-tos set-mode proxy >/dev/null 2>&1 || true
+warp-cli --accept-tos connect >/dev/null 2>&1 || true
+
+# NOTE: two traps avoided below, both of which made this check report failure
+# while WARP was in fact connected:
+#   1. `cmd | grep -q X && break` under `set -e` aborts the script when status
+#      is still "Connecting", because the AND-list returns non-zero.
+#   2. `cmd | grep -q X` under `set -o pipefail`: grep -q exits on first match,
+#      warp-cli dies on SIGPIPE, and pipefail propagates that non-zero - so an
+#      exact match still evaluates false.
+# Hence: capture first, match with `case`. No pipeline at all.
 connected=0
 for _ in $(seq 1 30); do
   _status="$(warp-cli --accept-tos status 2>&1 || true)"
@@ -90,20 +142,61 @@ for _ in $(seq 1 30); do
   esac
   sleep 2
 done
-if [ "$connected" -eq 1 ]; then
-  ok "WARP connected"
+[ "$connected" -eq 1 ] || { die "WARP did not connect after waiting"; }
+ok "WARP connected"
+
+# -------------------------------------------------------------- opencode
+say "Checking opencode"
+find_opencode() {
+  local p
+  p="$(command -v opencode 2>/dev/null || true)"
+  if [ -n "$p" ] && [ -x "$p" ]; then printf '%s' "$p"; return 0; fi
+  for p in "$HOME/.opencode/bin/opencode" /root/.opencode/bin/opencode; do
+    if [ -x "$p" ]; then printf '%s' "$p"; return 0; fi
+  done
+  return 1
+}
+
+if OC="$(find_opencode)"; then
+  ok "found at $OC"
 else
-  warn "WARP did not connect after waiting"
-  warp-cli --accept-tos status 2>&1 || true
-  exit 1
+  say "opencode not found - installing from the official installer"
+  tmp="$(mktemp)"
+  curl -fsSL --max-time 120 "$OPENCODE_INSTALL_URL" -o "$tmp"
+  # Refuse to execute anything that is not plainly a bash script. curl|bash
+  # would happily run an HTML error page.
+  head -1 "$tmp" | grep -q '^#!.*bash' \
+    || { rm -f "$tmp"; die "downloaded installer is not a bash script; refusing to run it"; }
+  bash "$tmp" || { rm -f "$tmp"; die "opencode installer failed"; }
+  rm -f "$tmp"
+  hash -r
+  OC="$(find_opencode)" || die "opencode installer ran but no binary was found"
+  ok "installed at $OC"
 fi
 
-# ------------------------------------------------------------ 5. the wrapper
+OPCODE_VERSION="$("$OC" --version 2>/dev/null | head -1 || echo unknown)"
+ok "version: $OPCODE_VERSION"
+
+# --------------------------------------------------- version resilience
+# The wrapper depends on `--standalone`. If a future opencode drops it the
+# wrapper would silently stop using the proxy and burn the normal quota, so
+# refuse to continue instead of degrading quietly.
+say "Verifying the wrapper's required flags still exist"
+_run_help="$("$OC" run --help 2>&1 || true)"
+case "$_run_help" in
+  *--standalone*) ok "'run --standalone' available" ;;
+  *) die "This opencode version does not support 'run --standalone'.
+  The wrapper relies on it, and without it proxy env vars would be ignored
+  silently (the background service makes the actual inference calls).
+  opencode version: $OPCODE_VERSION" ;;
+esac
+
+# ---------------------------------------------------------------- wrapper
 say "Installing /usr/local/bin/opencode-warp"
 install -m 0755 "${SCRIPT_DIR}/opencode-warp" /usr/local/bin/opencode-warp
 ok "installed"
 
-# ------------------------------------------------------------ 6. bashrc fn
+# ---------------------------------------------------------------- bashrc fn
 say "Adding opencode() shortcut to ~/.bashrc"
 touch ~/.bashrc
 if grep -q '# >>> opencode-warp shortcut >>>' ~/.bashrc; then
@@ -125,24 +218,23 @@ opencode() {
 }
 # <<< opencode-warp shortcut <<<
 EOF
-  ok "added (a timestamped backup of ~/.bashrc was made)"
+  ok "added (timestamped backup of ~/.bashrc made)"
 fi
 
-# ----------------------------------------------------------------- 7. verify
+# ------------------------------------------------------------------- verify
 say "Verifying"
-if bash -n ~/.bashrc; then ok "~/.bashrc parses cleanly"; else warn "~/.bashrc has a syntax error"; fi
+bash -n ~/.bashrc && ok "~/.bashrc parses cleanly" || die "~/.bashrc has a syntax error"
 
-if curl -s --max-time 15 -x "$PROXY" https://api.ipify.org >/dev/null 2>&1; then
-  ok "proxy reachable: $(curl -s --max-time 15 -x "$PROXY" https://api.ipify.org)"
-else
-  warn "proxy not reachable on ${PROXY}"
-fi
+_warp_ip="$(curl -s --max-time 15 -x "$PROXY" https://api.ipify.org 2>/dev/null || true)"
+_direct_ip="$(curl -s --max-time 15 https://api.ipify.org 2>/dev/null || true)"
+[ -n "$_warp_ip" ] || die "proxy not reachable on ${PROXY}"
+ok "proxy reachable"
 
 printf '\n'
 say "Done."
 cat <<EOF
-  Normal egress   : $(curl -s --max-time 15 https://api.ipify.org 2>/dev/null || echo '(unavailable)')
-  Through WARP    : $(curl -s --max-time 15 -x "$PROXY" https://api.ipify.org 2>/dev/null || echo '(unavailable)')
+  Normal egress   : ${_direct_ip:-?}
+  Through WARP    : ${_warp_ip:-?}
 
   Start a new shell (or: source ~/.bashrc), then:
 

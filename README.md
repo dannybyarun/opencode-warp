@@ -24,7 +24,51 @@ source ~/.bashrc        # or open a new shell
 opencode --stand run -m opencode/deepseek-v4.1-flash-free "hello"
 ```
 
-Requires: Debian/Ubuntu, `root`, and opencode already installed.
+`setup.sh` checks every requirement **before** it changes anything, and fails
+with an explanation instead of dying halfway through.
+
+## Supported systems
+
+| Platform | Status |
+|---|---|
+| Debian / Ubuntu / Raspbian | ✅ official `.deb` |
+| RHEL / Rocky / Alma / CentOS / Fedora / Oracle Linux | ✅ official `.rpm` |
+| Arch / openSUSE / Alpine | ❌ no official package — install WARP yourself, then `./setup.sh --skip-warp-package` |
+| macOS / Windows | ⚠️ partial; different install path, behaviour varies |
+| Containers (Docker, most sandboxes) | ❌ almost always rejected |
+
+### Why containers usually fail
+
+WARP needs **both** `/dev/net/tun` and a working **systemd** as PID 1. Most
+containers have neither. `setup.sh` detects this up front and tells you,
+rather than failing partway through an install. Pass
+`--skip-warp-package` if WARP is already running in proxy mode on
+`127.0.0.1:40000`.
+
+## opencode is installed automatically
+
+If no opencode binary is found on `PATH` or in `~/.opencode/bin`,
+`setup.sh` fetches the **official installer** from `https://opencode.ai/install`
+and runs it.
+
+It downloads to a temp file and **verifies the first line is a bash shebang
+before executing** — refusing to run anything that looks like an HTML error
+page. It does not blindly pipe `curl` into `bash`.
+
+Note: the npm package `opencode-ai` is **not** used. It currently ships
+`1.19.3` while the official installer delivers `2.0.31` — npm would install
+something stale.
+
+## Survives opencode upgrades
+
+The wrapper depends on `run --standalone`. If a future opencode removed that
+flag, the proxy env vars would be **silently ignored** (the background service
+is what actually makes inference calls) and opencode would quietly burn your
+normal quota — the worst possible failure, because it looks like success.
+
+So both `setup.sh` and the wrapper **feature-detect** `--standalone` and refuse
+to run without it, printing the offending version. Loud failure beats silent
+fallthrough.
 
 ---
 

@@ -37,6 +37,24 @@ REAL="$(find_opencode)" || {
 
 probe() { curl -s --max-time 5 -x "$PROXY" https://api.ipify.org >/dev/null 2>&1; }
 
+# Guard against a future opencode that drops `--standalone`.
+# If it vanished, the env vars below would be silently ignored (the background
+# service is what makes the inference calls) and opencode would quietly fall
+# back to normal egress. Failing loudly beats degrading silently.
+# NOTE: match with `case`, never `cmd | grep -q` - under `set -o pipefail` a
+# SIGPIPE from grep's early exit turns an exact match into a false result.
+_standalone_help="$($OPCODE_REAL run --help 2>&1 || true)"
+case "$_standalone_help" in
+  *--standalone*) : ;;
+  *)
+    printf 'opencode-warp: this opencode has no "run --standalone" flag\n' >&2
+    printf '  version: %s\n' "$($OPCODE_REAL --version 2>/dev/null | head -1)" >&2
+    printf '  the wrapper requires it; refusing to run, because without it the\n' >&2
+    printf '  proxy would be silently ignored and normal egress used instead.\n' >&2
+    exit 1
+    ;;
+esac
+
 if ! probe; then
   # WARP may simply not be connected yet - try to bring it up rather than fail.
   if command -v warp-cli >/dev/null 2>&1; then
