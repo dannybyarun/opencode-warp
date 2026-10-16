@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# opencode-warp - run opencode through the local Cloudflare WARP proxy.
+#
+# WARP runs in *proxy* mode on 127.0.0.1:40000, so this does not touch the
+# machine's normal routing. Two things are injected:
+#
+#   HTTPS_PROXY / HTTP_PROXY  -> send outbound traffic through WARP
+#   NO_PROXY                  -> opencode MUST still reach its own local
+#                                background service, otherwise it 502s and
+#                                dies with `service.ensure` errors
+#
+# Plus `--standalone`, because the background service is what actually makes
+# inference calls. Env vars on the CLI alone never reach it.
+#
+set -euo pipefail
+
+PORT="${WARP_PROXY_PORT:-40000}"
+PROXY="http://127.0.0.1:${PORT}"
+
+find_opencode() {
+  local p
+  p="$(command -v opencode 2>/dev/null || true)"
+  if [ -n "$p" ] && [ -x "$p" ]; then echo "$p"; return 0; fi
+  for p in "$HOME/.opencode/bin/opencode" "/root/.opencode/bin/opencode" "/usr/local/bin/opencode.bin"; do
+    if [ -x "$p" ]; then echo "$p"; return 0; fi
+  done
+  return 1
+}
+
+REAL="$(find_opencode)" || {
+  printf 'opencode-warp: cannot find the opencode binary\n' >&2
+  printf '  install opencode first, or set OPCODE_REAL=/path/to/opencode\n' >&2
+  exit 127
+}
+: "${OPCODE_REAL:=$REAL}"
+
+probe() { curl -s --max-time 5 -x "$PROXY" https://api.ipify.org >/dev/null 2>&1; }
+
+if ! probe; then
+  # WARP may simply not be connected yet - try to bring it up rather than fail.
+  if command -v warp-cli >/dev/null 2>&1; then
+    warp-cli connect >/dev/null 2>&1 || true
+    sleep 4
+  fi
+  if ! probe; then
+    printf 'opencode-warp: WARP proxy unreachable on %s\n' "$PROXY" >&2
+    printf '  check: warp-cli status\n' >&2
+    printf '  setup: ./setup.sh\n' >&2
+    exit 1
+  fi
+fi
+
+exec env \
+  HTTPS_PROXY="$PROXY" \
+  HTTP_PROXY="$PROXY" \
+  NO_PROXY="127.0.0.1,localhost,::1" \
+  no_proxy="127.0.0.1,localhost,::1" \
+  "$OPCODE_REAL" "$@" --standalone
