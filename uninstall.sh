@@ -26,6 +26,18 @@ else
   ok "not present"
 fi
 
+say "Removing /usr/local/lib/opencode-warp (probe + rotate helpers)"
+if [ -d /usr/local/lib/opencode-warp ]; then
+  rm -rf /usr/local/lib/opencode-warp
+  ok "removed"
+else
+  ok "not present"
+fi
+
+say "Removing the auto-rotation state cache"
+rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/opencode-warp" 2>/dev/null || true
+ok "removed"
+
 # ----------------------------------------------------------------- bashrc
 say "Removing the opencode() block from ~/.bashrc"
 if [ -f ~/.bashrc ] && grep -q '# >>> opencode-warp shortcut >>>' ~/.bashrc; then

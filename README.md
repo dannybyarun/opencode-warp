@@ -27,6 +27,10 @@ opencode --stand run -m opencode/deepseek-v4.1-flash-free "hello"
 `setup.sh` checks every requirement **before** it changes anything, and fails
 with an explanation instead of dying halfway through.
 
+If the free tier is already throttled, `opencode --stand` probes the WARP
+ingress and rotates the anonymous registration before starting. See
+[Automatic recovery](#automatic-recovery-when-already-rate-limited).
+
 ## Supported systems
 
 | Platform | Status |
@@ -76,8 +80,8 @@ fallthrough.
 
 | Command | Behaviour |
 |---|---|
-| `opencode --stand run -m <model> "msg"` | through WARP, adds `--standalone` |
-| `opencode --stand` | TUI, through WARP |
+| `opencode --stand run -m <model> "msg"` | through WARP, adds `--standalone`, auto-recovers if throttled |
+| `opencode --stand` | TUI, through WARP, auto-recovers if throttled |
 | `opencode run -m <model> "msg"` | unchanged — normal egress |
 | `opencode-warp run -m <model> "msg"` | same as `--stand`, works in **any** shell |
 
@@ -106,28 +110,59 @@ The wrapper handles both. If you drive opencode another way, you must too.
 
 ---
 
-## What this does **not** do
+## Automatic recovery when already rate limited
 
-Being explicit, because it matters:
+`opencode --stand` (and `opencode-warp`) can recover automatically:
+
+1. It looks at opencode's own log for the most recent rate-limit error.
+   It only probes when that error is newer than the last successful check, so
+   healthy launches do not pay for an extra request.
+2. `probe.sh` sends one tiny `PONG` request through WARP.
+3. If throttled, `warp-rotate.sh` deletes the anonymous WARP registration,
+   creates a new one, reconnects in proxy mode, and probes again. It retries
+   up to `WARP_ROTATE_ATTEMPTS` times (default 2), then warns and lets
+   opencode start anyway.
+4. `probe.sh` itself never rotates. It exports `OPENCODE_WARP_NO_ROTATE=1`,
+   so the wrapper it launches cannot start a recursive preflight.
+
+Each probe is a real `opencode run` (one short `PONG` request), so it creates
+a small session and counts against your quota. That is why the log hint is
+used instead of probing on every launch.
+
+| Variable | Meaning |
+|---|---|
+| `OPENCODE_WARP_AUTO_ROTATE=0` | disable the preflight entirely |
+| `OPENCODE_WARP_FORCE_PROBE=1` | probe even if the log has no recent 429 |
+| `WARP_ROTATE_ATTEMPTS=3` | registration attempts (default 2) |
+| `OPENCODE_WARP_ROTATE_STRICT=1` | exit instead of starting opencode when recovery fails |
+| `OPENCODE_WARP_LOG=/path` | use a specific opencode log |
+
+The wrapper skips the preflight when you pass an explicit non-free
+`-m`/`--model`, because rotating the free bucket would not help that model.
+
+Manual recovery uses the same code path:
+
+```bash
+./warp-rotate.sh            # probe, rotate only if throttled
+./warp-rotate.sh --force    # always rotate, then probe
+./probe.sh                  # one-shot verdict, never rotates
+```
+
+Note: there is **no `reconnect` subcommand** — `warp-cli --accept-tos
+reconnect` fails with *unrecognized subcommand*. The helper does
+disconnect → registration delete → registration new → mode proxy → connect.
+
+### What it still cannot do
 
 - **It does not make you immune to rate limits.** opencode's free tier
   (`opencode.ai/inference`) enforces a daily quota that resets at **00:00 UTC**.
   Switching IP does not remove the cap; it may move you to a different
   bucket, or it may not.
-- **It does not rotate IPs.** There is no loop here that cycles WARP addresses
-  to avoid being throttled. Deliberately so.
-- **It does not guarantee a different IP every run.** WARP assigns you an
-  address from Cloudflare's own pool; you cannot choose one. To try for a
-  different one:
-
-  ```bash
-  warp-cli --accept-tos disconnect && warp-cli --accept-tos connect   # often the same address
-  warp-cli --accept-tos registration delete && warp-cli --accept-tos registration new \
-    && warp-cli --accept-tos mode proxy && warp-cli --accept-tos connect   # new device identity
-  ```
-
-  Note: there is **no `reconnect` subcommand** — `warp-cli --accept-tos
-  reconnect` fails with *unrecognized subcommand*. Use the two above.
+- **It does not guarantee a different IP.** WARP assigns an address from
+  Cloudflare's own pool; you cannot choose one. That is why the helper probes
+  after each rotation instead of assuming success.
+- **It churns device registrations.** Every attempt creates a new anonymous
+  Cloudflare device. Keep `WARP_ROTATE_ATTEMPTS` small.
 
 ### What we actually observed
 
@@ -157,17 +192,20 @@ succeed, so the effect looks like nothing.
 |---|---|
 | `setup.sh` | installer (idempotent, safe to re-run) |
 | `opencode-warp` | the wrapper; installed to `/usr/local/bin` |
-| `uninstall.sh` | removes the wrapper, bashrc block, apt repo |
+| `uninstall.sh` | removes the wrapper, helpers, bashrc block, apt repo |
 | `probe.sh` | one-shot verdict: is this ingress throttled? (`0` ok, `1` throttled, `2` no verdict) |
+| `warp-rotate.sh` | probe → rotate device registration → probe (`0` ok, `1` throttled, `2` no verdict) |
 
-`setup.sh` creates a timestamped backup of `~/.bashrc` before editing it.
+`probe.sh` and `warp-rotate.sh` are installed to
+`/usr/local/lib/opencode-warp/`. `setup.sh` creates a timestamped backup of
+`~/.bashrc` before editing it.
 
 ---
 
 ## Uninstall
 
 ```bash
-sudo ./uninstall.sh            # wrapper + bashrc block + apt repo
+sudo ./uninstall.sh            # wrapper + helpers + bashrc block + apt repo
 sudo ./uninstall.sh --purge    # also the package and device registration
 ```
 
@@ -178,6 +216,10 @@ sudo ./uninstall.sh --purge    # also the package and device registration
 `setup.sh` runs `warp-cli registration new`, which creates an **anonymous
 device registration** with Cloudflare — no email, no account login. The
 registration state lives in `/var/lib/cloudflare-warp/`. `--purge` deletes it.
+
+When auto-recovery triggers, `warp-rotate.sh` deletes that anonymous
+registration and creates a new one. It only does so when opencode's log shows
+a recent rate-limit error (or when you pass `--force`).
 
 ---
 

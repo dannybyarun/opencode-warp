@@ -13,6 +13,10 @@
 #
 set -u
 
+# This script is deliberately one-shot: never let the wrapper it launches run
+# its own preflight rotation, which would recurse.
+export OPENCODE_WARP_NO_ROTATE=1
+
 PROXY="${PROXY:-http://127.0.0.1:${WARP_PROXY_PORT:-40000}}"
 MODEL="${PROBE_MODEL:-opencode/deepseek-v4.1-flash-free}"
 RUN="${PROBE_RUN:-opencode-warp}"

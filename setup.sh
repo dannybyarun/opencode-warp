@@ -196,6 +196,15 @@ say "Installing /usr/local/bin/opencode-warp"
 install -m 0755 "${SCRIPT_DIR}/opencode-warp" /usr/local/bin/opencode-warp
 ok "installed"
 
+# The wrapper looks for these next to itself, then in this lib directory.
+# probe.sh has to be installed too: the preflight uses it to decide whether
+# the ingress is throttled before doing anything destructive.
+say "Installing probe.sh and warp-rotate.sh"
+install -d -m 0755 /usr/local/lib/opencode-warp
+install -m 0755 "${SCRIPT_DIR}/probe.sh" /usr/local/lib/opencode-warp/probe.sh
+install -m 0755 "${SCRIPT_DIR}/warp-rotate.sh" /usr/local/lib/opencode-warp/warp-rotate.sh
+ok "installed in /usr/local/lib/opencode-warp"
+
 # ---------------------------------------------------------------- bashrc fn
 say "Adding opencode() shortcut to ~/.bashrc"
 touch ~/.bashrc
@@ -241,6 +250,18 @@ cat <<EOF
     opencode --stand run -m opencode/deepseek-v4.1-flash-free "hello"
     opencode-warp run -m <model> "hello"      # same thing, any shell
     opencode --stand                          # TUI through WARP
+
+  If opencode's log shows a recent rate-limit error, --stand first checks the
+  WARP ingress and rotates the anonymous registration when it is throttled:
+
+    WARP_ROTATE_ATTEMPTS=2 opencode --stand   # retries (default 2)
+    OPENCODE_WARP_AUTO_ROTATE=0 opencode ...  # disable auto-rotation
+    OPENCODE_WARP_FORCE_PROBE=1 opencode ...  # check even without a log hint
+
+  Manual check / recovery, useful in any shell:
+
+    /usr/local/lib/opencode-warp/probe.sh
+    /usr/local/lib/opencode-warp/warp-rotate.sh
 
   NOTE: the 'run' subcommand is still required - --stand only injects
   --standalone, it does not invent the subcommand.

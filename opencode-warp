@@ -17,6 +17,9 @@ set -euo pipefail
 
 PORT="${WARP_PROXY_PORT:-40000}"
 PROXY="http://127.0.0.1:${PORT}"
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/opencode-warp"
 
 find_opencode() {
   local p
@@ -36,6 +39,96 @@ REAL="$(find_opencode)" || {
 : "${OPCODE_REAL:=$REAL}"
 
 probe() { curl -s --max-time 5 -x "$PROXY" https://api.ipify.org >/dev/null 2>&1; }
+
+# -------------------------------------------- automatic rate-limit recovery
+# A model request is the only reliable way to prove an ingress is throttled,
+# so do not fire one on every launch. Instead, use opencode's own log: probe
+# only if the last rate-limit error is newer than the last successful
+# preflight. warp-rotate.sh then does delete/new/connect/probe.
+# OPENCODE_WARP_NO_ROTATE is the recursion guard used by probe.sh.
+find_opencode_log() {
+  local p
+  for p in "${OPENCODE_WARP_LOG:-}" \
+           "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/log/opencode.log" \
+           "$HOME/.local/share/opencode/log/opencode.log"; do
+    if [ -n "$p" ] && [ -r "$p" ]; then printf '%s\n' "$p"; return 0; fi
+  done
+  return 1
+}
+
+last_rate_limit_epoch() {
+  local log line ts epoch
+  log="$(find_opencode_log)" || return 1
+  # `level=ERROR` matters: command lines are logged at INFO and can contain
+  # the literal text "429", which must not count as a throttle.
+  line="$(grep -E '^timestamp=[^ ]+ level=ERROR .*(Free usage limit reached|Rate limit exceeded|QuotaExceeded|Too Many Requests|HTTP 429|status[=: ]*429)' "$log" 2>/dev/null | tail -n 1)" || return 1
+  [ -n "$line" ] || return 1
+  ts="${line#timestamp=}"
+  ts="${ts%% *}"
+  if epoch="$(date -u -d "$ts" +%s 2>/dev/null)"; then
+    printf '%s\n' "$epoch"
+  else
+    printf '2147483647\n'      # unparseable timestamp: be conservative, probe
+  fi
+}
+
+preflight_needed() {
+  [ "$AUTO_ROTATE" -eq 1 ] || return 1
+  [ "${OPENCODE_WARP_NO_ROTATE:-0}" = "1" ] && return 1
+  [ "${OPENCODE_WARP_FORCE_PROBE:-0}" = "1" ] && return 0
+
+  if [ -f "$STATE_DIR/last-throttled" ] \
+     && { [ ! -f "$STATE_DIR/last-ok" ] || [ "$STATE_DIR/last-throttled" -nt "$STATE_DIR/last-ok" ]; }; then
+    return 0
+  fi
+
+  local rl ok
+  rl="$(last_rate_limit_epoch)" || return 1
+  [ -n "$rl" ] || return 1
+  [ -f "$STATE_DIR/last-ok" ] || return 0
+  ok="$(cat "$STATE_DIR/last-ok" 2>/dev/null || true)"
+  case "$ok" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$rl" -gt "$ok" ]
+}
+
+find_rotate() {
+  local p
+  for p in "$SELF_DIR/warp-rotate.sh" "/usr/local/lib/opencode-warp/warp-rotate.sh"; do
+    if [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
+  done
+  return 1
+}
+
+AUTO_ROTATE="${OPENCODE_WARP_AUTO_ROTATE:-1}"
+case "$AUTO_ROTATE" in
+  0|no|off|false|False) AUTO_ROTATE=0 ;;
+  *) AUTO_ROTATE=1 ;;
+esac
+
+requested_model=""
+need_model_value=0
+skip_preflight=0
+for arg in "$@"; do
+  case "$arg" in
+    --version|-v|--help|-h|--completions|--wizard) skip_preflight=1 ;;
+    --model=*) requested_model="${arg#--model=}" ;;
+    -m|--model) need_model_value=1 ;;
+    *)
+      if [ "$need_model_value" -eq 1 ]; then
+        requested_model="$arg"
+        need_model_value=0
+      fi
+      ;;
+  esac
+done
+
+[ "$skip_preflight" -eq 1 ] && AUTO_ROTATE=0
+if [ -n "$requested_model" ]; then
+  case "$requested_model" in
+    *free*) : ;;
+    *) AUTO_ROTATE=0 ;;   # explicit paid model: rotating the free bucket is pointless
+  esac
+fi
 
 # Guard against a future opencode that drops `--standalone`.
 # If it vanished, the env vars below would be silently ignored (the background
@@ -67,6 +160,34 @@ if ! probe; then
     printf '  setup: ./setup.sh\n' >&2
     exit 1
   fi
+fi
+
+if preflight_needed; then
+  ROTATE="$(find_rotate)" || {
+    printf 'opencode-warp: detected a rate limit, but warp-rotate.sh is missing\n' >&2
+    printf '  re-run setup.sh, or set OPENCODE_WARP_AUTO_ROTATE=0 to skip\n' >&2
+    exit 1
+  }
+  printf 'opencode-warp: rate limit detected in the opencode log; checking WARP\n' >&2
+  if [ -n "$requested_model" ]; then
+    export PROBE_MODEL="${PROBE_MODEL:-$requested_model}"
+  fi
+
+  rc=0
+  PROBE_RUN="${PROBE_RUN:-$SELF}" OPENCODE_WARP_NO_ROTATE=1 "$ROTATE" || rc=$?
+  case "$rc" in
+    0) ;;
+    1)
+      printf 'opencode-warp: WARP is still throttled; starting opencode anyway\n' >&2
+      [ "${OPENCODE_WARP_ROTATE_STRICT:-0}" = "1" ] && exit 1
+      ;;
+    *)
+      printf 'opencode-warp: could not verify the new ingress (or restore the proxy);\n' >&2
+      printf '  refusing to start opencode through a possibly broken WARP path.\n' >&2
+      printf '  check: warp-cli status  /  ./probe.sh\n' >&2
+      exit "$rc"
+      ;;
+  esac
 fi
 
 exec env \
