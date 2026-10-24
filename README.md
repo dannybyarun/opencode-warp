@@ -126,6 +126,17 @@ The wrapper handles both. If you drive opencode another way, you must too.
 4. `probe.sh` itself never rotates. It exports `OPENCODE_WARP_NO_ROTATE=1`,
    so the wrapper it launches cannot start a recursive preflight.
 
+A connection reset (`ECONNRESET`, `socket connection was closed`, and similar
+transport errors) counts as a rotate-worthy verdict (`exit 3`), not as
+"no verdict" — a broken WARP ingress is exactly what a fresh registration
+usually fixes. `probe.sh` stops as soon as the socket error appears instead of
+waiting for the full timeout.
+
+If the probe still cannot produce a verdict (auth error, missing binary, a
+silent hang), the wrapper starts opencode **only if the local WARP proxy is
+reachable**, and prints a warning. It refuses to start when the proxy itself is
+down, or when `OPENCODE_WARP_ROTATE_STRICT=1` is set.
+
 Each probe is a real `opencode run` (one short `PONG` request), so it creates
 a small session and counts against your quota. That is why the log hint is
 used instead of probing on every launch.
@@ -135,7 +146,7 @@ used instead of probing on every launch.
 | `OPENCODE_WARP_AUTO_ROTATE=0` | disable all automatic rotation (launch-time and live plugin) |
 | `OPENCODE_WARP_FORCE_PROBE=1` | probe even if the log has no recent 429 |
 | `WARP_ROTATE_ATTEMPTS=3` | registration attempts (default 2) |
-| `OPENCODE_WARP_ROTATE_STRICT=1` | exit instead of starting opencode when recovery fails |
+| `OPENCODE_WARP_ROTATE_STRICT=1` | exit instead of starting opencode when recovery fails or no verdict is available |
 | `OPENCODE_WARP_LOG=/path` | use a specific opencode log |
 
 ### Live 429 recovery (plugin)
@@ -237,14 +248,28 @@ succeed, so the effect looks like nothing.
 | `setup.sh` | installer (idempotent, safe to re-run) |
 | `opencode-warp` | the wrapper; installed to `/usr/local/bin` |
 | `uninstall.sh` | removes the wrapper, helpers, bashrc block, apt repo |
-| `probe.sh` | one-shot verdict: is this ingress throttled? (`0` ok, `1` throttled, `2` no verdict) |
-| `warp-rotate.sh` | probe → rotate device registration → probe (`0` ok, `1` throttled, `2` no verdict) |
+| `probe.sh` | one-shot verdict: is this ingress throttled? (`0` ok, `1` throttled, `2` no verdict, `3` transport failure) |
+| `warp-rotate.sh` | probe → rotate device registration → probe (`0` ok, `1` still throttled/failing, `2` no verdict) |
 | `opencode-warp-rotate.ts` | live-session 429 plugin: rotate WARP and retry the request |
+| `tests/run-tests.sh` | offline regression tests with stubbed probe/rotate/opencode commands |
 
 `probe.sh` and `warp-rotate.sh` are installed to
 `/usr/local/lib/opencode-warp/`. The plugin is installed to
 `${XDG_CONFIG_HOME:-~/.config}/opencode/plugins/`. `setup.sh` creates a
 timestamped backup of `~/.bashrc` before editing it.
+
+---
+
+## Tests
+
+```bash
+./tests/run-tests.sh
+```
+
+The suite is offline: it stubs `opencode`, `warp-cli`, `curl`, and the probe,
+so it never creates a WARP registration or spends quota. It covers every probe
+verdict (success, throttled, transport failure, no verdict, timeout), transport
+rotation and exhaustion, and the wrapper's strict/fallback startup policy.
 
 ---
 

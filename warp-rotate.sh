@@ -15,7 +15,7 @@
 #     && ./probe.sh
 #
 # Exit codes:  0 = healthy or recovered
-#              1 = still throttled after all rotations
+#              1 = still throttled / still failing after all rotations
 #              2 = no verdict (probe/warp-cli/proxy failure)
 #
 # Options:     --force         rotate first, without probing the current ingress
@@ -210,6 +210,12 @@ if [ "$FORCE" -eq 0 ]; then
       exit 0
       ;;
     1) : ;;
+    3)
+      # The WARP tunnel itself is resetting connections. That is exactly the
+      # kind of broken ingress a fresh registration fixes, so rotate instead
+      # of treating it as an unclassifiable failure.
+      say "transport failure through WARP; rotating"
+      ;;
     *)
       say "no verdict from probe.sh; not rotating"
       tail -8 "$probe_out" | sed 's/^/  /' >&2
@@ -218,7 +224,7 @@ if [ "$FORCE" -eq 0 ]; then
   esac
 
   state_write last-throttled
-  say "ingress is throttled"
+  say "ingress is throttled or failing"
 fi
 
 for attempt in $(seq 1 "$ATTEMPTS"); do
@@ -231,6 +237,17 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
   say "probing the new ingress"
   probe_ingress "$probe_out"
   rc=$?
+  case "$rc" in
+    0) : ;;
+    1) say "the new ingress is still throttled" ;;
+    3) say "the new ingress is resetting connections" ;;
+    *)
+      say "no verdict after rotation; not retrying"
+      tail -8 "$probe_out" | sed 's/^/  /' >&2
+      state_write last-throttled
+      exit 2
+      ;;
+  esac
   if [ "$rc" -eq 0 ]; then
     say "recovered: the new ingress passes"
     grep -E '^(ip|loc|warp)=' "$probe_out" 2>/dev/null | sed 's/^/  /' >&2 || true
@@ -239,12 +256,6 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
     rotated_ok=1
     break
   fi
-  if [ "$rc" -ne 1 ]; then
-    say "no verdict after rotation; not retrying"
-    tail -8 "$probe_out" | sed 's/^/  /' >&2
-    state_write last-throttled
-    exit 2
-  fi
 done
 
 if [ "$rotated_ok" -eq 1 ]; then
@@ -252,6 +263,6 @@ if [ "$rotated_ok" -eq 1 ]; then
 fi
 
 state_write last-throttled
-say "still throttled after ${ATTEMPTS} rotation attempt(s)"
+say "the WARP ingress is still not passing after ${ATTEMPTS} rotation attempt(s)"
 tail -8 "$probe_out" | sed 's/^/  /' >&2
 exit 1

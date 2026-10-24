@@ -178,14 +178,26 @@ if preflight_needed; then
   case "$rc" in
     0) ;;
     1)
-      printf 'opencode-warp: WARP is still throttled; starting opencode anyway\n' >&2
+      printf 'opencode-warp: WARP recovery did not produce a healthy ingress; starting opencode anyway\n' >&2
       [ "${OPENCODE_WARP_ROTATE_STRICT:-0}" = "1" ] && exit 1
       ;;
     *)
-      printf 'opencode-warp: could not verify the new ingress (or restore the proxy);\n' >&2
-      printf '  refusing to start opencode through a possibly broken WARP path.\n' >&2
-      printf '  check: warp-cli status  /  ./probe.sh\n' >&2
-      exit "$rc"
+      if [ "${OPENCODE_WARP_ROTATE_STRICT:-0}" = "1" ]; then
+        printf 'opencode-warp: could not get a verdict from the WARP ingress (exit %s);\n' "$rc" >&2
+        printf '  refusing to start because OPENCODE_WARP_ROTATE_STRICT=1.\n' >&2
+        printf '  check: warp-cli status  /  ./probe.sh\n' >&2
+        exit "$rc"
+      fi
+      if probe; then
+        printf 'opencode-warp: warning: could not get a model verdict through WARP (exit %s),\n' "$rc" >&2
+        printf '  but the WARP proxy itself is reachable; starting opencode anyway.\n' >&2
+        printf '  set OPENCODE_WARP_ROTATE_STRICT=1 to make this fatal.\n' >&2
+      else
+        printf 'opencode-warp: could not verify the new ingress and the WARP proxy is\n' >&2
+        printf '  unreachable; refusing to start opencode through a broken WARP path.\n' >&2
+        printf '  check: warp-cli status  /  ./probe.sh\n' >&2
+        exit "$rc"
+      fi
       ;;
   esac
 fi
