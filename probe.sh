@@ -20,8 +20,9 @@ export OPENCODE_WARP_NO_ROTATE=1
 PROXY="${PROXY:-http://127.0.0.1:${WARP_PROXY_PORT:-40000}}"
 MODEL="${PROBE_MODEL:-opencode/deepseek-v4.1-flash-free}"
 RUN="${PROBE_RUN:-opencode-warp}"
-# Optional: the ratelimit-retry plugin's log. Only used to enrich the verdict
-# with the unblock time - the verdict itself never depends on it existing.
+# Optional: the opencode-warp plugin's 429 log (same schema as the older
+# ratelimit-retry plugin). Only used to enrich the verdict with the unblock
+# time - the verdict itself never depends on it existing.
 LOG="${OPENCODE_RATELIMIT_LOG:-$HOME/.local/share/opencode/ratelimit-retry.jsonl}"
 
 echo "--- egress (WARP) ---"

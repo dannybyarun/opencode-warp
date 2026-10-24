@@ -34,6 +34,15 @@ else
   ok "not present"
 fi
 
+say "Removing the live 429-recovery plugin"
+PLUGIN_DIR="${OPENCODE_WARP_PLUGIN_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins}"
+if [ -f "$PLUGIN_DIR/opencode-warp-rotate.ts" ]; then
+  rm -f "$PLUGIN_DIR/opencode-warp-rotate.ts"
+  ok "removed"
+else
+  ok "not present"
+fi
+
 say "Removing the auto-rotation state cache"
 rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/opencode-warp" 2>/dev/null || true
 ok "removed"

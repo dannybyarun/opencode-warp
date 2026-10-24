@@ -205,6 +205,15 @@ install -m 0755 "${SCRIPT_DIR}/probe.sh" /usr/local/lib/opencode-warp/probe.sh
 install -m 0755 "${SCRIPT_DIR}/warp-rotate.sh" /usr/local/lib/opencode-warp/warp-rotate.sh
 ok "installed in /usr/local/lib/opencode-warp"
 
+# OpenCode discovers direct .ts files under <config>/plugins automatically.
+# The plugin is inert unless it sees the wrapper's local proxy env, so it is
+# safe to leave installed for normal (non-WARP) sessions.
+say "Installing the live 429-recovery plugin"
+PLUGIN_DIR="${OPENCODE_WARP_PLUGIN_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins}"
+install -d -m 0755 "$PLUGIN_DIR"
+install -m 0644 "${SCRIPT_DIR}/opencode-warp-rotate.ts" "$PLUGIN_DIR/opencode-warp-rotate.ts"
+ok "installed in $PLUGIN_DIR"
+
 # ---------------------------------------------------------------- bashrc fn
 say "Adding opencode() shortcut to ~/.bashrc"
 touch ~/.bashrc
@@ -262,6 +271,10 @@ cat <<EOF
 
     /usr/local/lib/opencode-warp/probe.sh
     /usr/local/lib/opencode-warp/warp-rotate.sh
+
+  A live 429 plugin was installed for --stand sessions:
+
+    ${PLUGIN_DIR}/opencode-warp-rotate.ts
 
   NOTE: the 'run' subcommand is still required - --stand only injects
   --standalone, it does not invent the subcommand.

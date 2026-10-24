@@ -28,7 +28,8 @@ opencode --stand run -m opencode/deepseek-v4.1-flash-free "hello"
 with an explanation instead of dying halfway through.
 
 If the free tier is already throttled, `opencode --stand` probes the WARP
-ingress and rotates the anonymous registration before starting. See
+ingress and rotates the anonymous registration before starting. A plugin also
+handles a 429 that happens mid-session. See
 [Automatic recovery](#automatic-recovery-when-already-rate-limited).
 
 ## Supported systems
@@ -131,11 +132,52 @@ used instead of probing on every launch.
 
 | Variable | Meaning |
 |---|---|
-| `OPENCODE_WARP_AUTO_ROTATE=0` | disable the preflight entirely |
+| `OPENCODE_WARP_AUTO_ROTATE=0` | disable all automatic rotation (launch-time and live plugin) |
 | `OPENCODE_WARP_FORCE_PROBE=1` | probe even if the log has no recent 429 |
 | `WARP_ROTATE_ATTEMPTS=3` | registration attempts (default 2) |
 | `OPENCODE_WARP_ROTATE_STRICT=1` | exit instead of starting opencode when recovery fails |
 | `OPENCODE_WARP_LOG=/path` | use a specific opencode log |
+
+### Live 429 recovery (plugin)
+
+`setup.sh` also installs `opencode-warp-rotate.ts` into
+`${XDG_CONFIG_HOME:-~/.config}/opencode/plugins/`. OpenCode loads it
+automatically. It stays inert unless the session is using the local WARP
+proxy (`HTTPS_PROXY` points at `127.0.0.1:40000`) and the model id contains
+`free`.
+
+When a model request fails with 429 / `Free usage limit reached`, the plugin:
+
+1. records `retry-after` and `cf-ray` in the 429 log,
+2. runs `warp-rotate.sh --rotate-only` — no nested `opencode run`, so it cannot
+   deadlock the session that is waiting for the rotation,
+3. sets OpenCode's retry decision to retry the same request after 1.5 seconds.
+
+One rotation is shared by all sessions. A successful rotation is offered to
+other sessions for 5 seconds without creating another registration; the
+session that used it will not rotate again inside that window. Each session is
+capped at two physical rotations. OpenCode's own hard retry-attempt limit still
+applies, so a session that has already exhausted its retries can still fail.
+
+The plugin appends its decisions to
+`~/.local/share/opencode/ratelimit-retry.jsonl` (`OPENCODE_RATELIMIT_LOG`
+overrides the path). The file records every observed 429 with `retry-after` /
+`cf-ray`, plus each rotation attempt and its outcome.
+
+| Variable | Meaning |
+|---|---|
+| `OPENCODE_WARP_PLUGIN=0` | disable the live plugin |
+| `OPENCODE_WARP_PLUGIN_MAX_ROTATIONS=3` | physical rotations per session (default 2) |
+| `OPENCODE_WARP_PLUGIN_COOLDOWN_MS=5000` | how long a fresh rotation is reusable |
+| `OPENCODE_WARP_PLUGIN_TIMEOUT_MS=90000` | rotation subprocess timeout |
+| `OPENCODE_WARP_PLUGIN_DEBUG=1` | log plugin decisions to stderr |
+| `OPENCODE_WARP_PLUGIN_FREE_ONLY=0` | rotate for non-free models too |
+| `OPENCODE_WARP_ROTATE=/path/warp-rotate.sh` | override the rotation helper |
+
+The retry path was validated end to end against a fake OpenAI-compatible
+provider: the first request returned `429 Free usage limit reached`, the plugin
+ran `warp-rotate.sh --rotate-only`, and OpenCode's retry then completed
+successfully.
 
 The wrapper skips the preflight when you pass an explicit non-free
 `-m`/`--model`, because rotating the free bucket would not help that model.
@@ -143,9 +185,10 @@ The wrapper skips the preflight when you pass an explicit non-free
 Manual recovery uses the same code path:
 
 ```bash
-./warp-rotate.sh            # probe, rotate only if throttled
-./warp-rotate.sh --force    # always rotate, then probe
-./probe.sh                  # one-shot verdict, never rotates
+./warp-rotate.sh               # probe, rotate only if throttled
+./warp-rotate.sh --force       # always rotate, then probe
+./warp-rotate.sh --rotate-only # rotate and verify the proxy, no opencode probe
+./probe.sh                     # one-shot verdict, never rotates
 ```
 
 Note: there is **no `reconnect` subcommand** — `warp-cli --accept-tos
@@ -162,7 +205,8 @@ disconnect → registration delete → registration new → mode proxy → conne
   Cloudflare's own pool; you cannot choose one. That is why the helper probes
   after each rotation instead of assuming success.
 - **It churns device registrations.** Every attempt creates a new anonymous
-  Cloudflare device. Keep `WARP_ROTATE_ATTEMPTS` small.
+  Cloudflare device. Keep `WARP_ROTATE_ATTEMPTS` and
+  `OPENCODE_WARP_PLUGIN_MAX_ROTATIONS` small.
 
 ### What we actually observed
 
@@ -195,10 +239,12 @@ succeed, so the effect looks like nothing.
 | `uninstall.sh` | removes the wrapper, helpers, bashrc block, apt repo |
 | `probe.sh` | one-shot verdict: is this ingress throttled? (`0` ok, `1` throttled, `2` no verdict) |
 | `warp-rotate.sh` | probe → rotate device registration → probe (`0` ok, `1` throttled, `2` no verdict) |
+| `opencode-warp-rotate.ts` | live-session 429 plugin: rotate WARP and retry the request |
 
 `probe.sh` and `warp-rotate.sh` are installed to
-`/usr/local/lib/opencode-warp/`. `setup.sh` creates a timestamped backup of
-`~/.bashrc` before editing it.
+`/usr/local/lib/opencode-warp/`. The plugin is installed to
+`${XDG_CONFIG_HOME:-~/.config}/opencode/plugins/`. `setup.sh` creates a
+timestamped backup of `~/.bashrc` before editing it.
 
 ---
 
@@ -217,9 +263,11 @@ sudo ./uninstall.sh --purge    # also the package and device registration
 device registration** with Cloudflare — no email, no account login. The
 registration state lives in `/var/lib/cloudflare-warp/`. `--purge` deletes it.
 
-When auto-recovery triggers, `warp-rotate.sh` deletes that anonymous
-registration and creates a new one. It only does so when opencode's log shows
-a recent rate-limit error (or when you pass `--force`).
+When auto-recovery triggers — at launch or through the live plugin —
+`warp-rotate.sh` deletes that anonymous registration and creates a new one.
+The launch-time path only does so when opencode's log shows a recent
+rate-limit error (or when you pass `--force`); the live path only does so after
+a 429 from a free model through the WARP proxy.
 
 ---
 

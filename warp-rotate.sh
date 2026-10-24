@@ -18,7 +18,10 @@
 #              1 = still throttled after all rotations
 #              2 = no verdict (probe/warp-cli/proxy failure)
 #
-# Options:     --force    rotate first, without probing the current ingress
+# Options:     --force         rotate first, without probing the current ingress
+#              --rotate-only   replace the registration and verify the proxy,
+#                              but do not run an opencode probe (used by the
+#                              real-time plugin during a live session)
 #
 # Environment:
 #   WARP_ROTATE_ATTEMPTS   rotation attempts (default 2)
@@ -49,7 +52,21 @@ if command -v flock >/dev/null 2>&1 && [ -d "$STATE_DIR" ]; then
 fi
 
 FORCE=0
-[ "${1:-}" = "--force" ] && FORCE=1
+ROTATE_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --force)       FORCE=1 ;;
+    --rotate-only) ROTATE_ONLY=1 ;;
+    -h|--help)
+      sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *)
+      printf 'opencode-warp: unknown option: %s\n' "$arg" >&2
+      exit 2
+      ;;
+  esac
+done
 
 say()  { printf 'opencode-warp: %s\n' "$*" >&2; }
 warn() { printf 'opencode-warp: warning: %s\n' "$*" >&2; }
@@ -68,10 +85,13 @@ find_probe() {
   return 1
 }
 
-PROBE="$(find_probe)" || {
-  say "cannot find probe.sh (set OPENCODE_WARP_PROBE)"
-  exit 2
-}
+PROBE=""
+if [ "$ROTATE_ONLY" -eq 0 ]; then
+  PROBE="$(find_probe)" || {
+    say "cannot find probe.sh (set OPENCODE_WARP_PROBE)"
+    exit 2
+  }
+fi
 
 state_write() {
   mkdir -p "$STATE_DIR" 2>/dev/null || return 0
@@ -129,7 +149,11 @@ rotate_registration() {
   settings="$(warp-cli --accept-tos settings 2>&1 || true)"
   case "$settings" in
     *WarpProxy*|*[Mm]ode:*[Pp]roxy*) ;;
-    *[Mm]ode:*) say "WARP is not in proxy mode after reconnect"; return 1 ;;
+    *[Mm]ode:*)
+      say "WARP is not in proxy mode after reconnect; disconnecting"
+      warp-cli --accept-tos disconnect >/dev/null 2>&1 || true
+      return 1
+      ;;
     *) : ;;   # unknown settings format; the proxy probe below is the real test
   esac
 
@@ -143,6 +167,28 @@ rotate_registration() {
   say "proxy $PROXY is unreachable after rotation"
   return 1
 }
+
+# Live-session path used by the OpenCode plugin. It must not run an
+# `opencode run` probe: that would start a nested OpenCode inside the session
+# that is waiting for this rotation. Reaching the local proxy is enough; the
+# retried model request is the real throttle test.
+if [ "$ROTATE_ONLY" -eq 1 ]; then
+  say "rotate-only: replacing the WARP registration"
+  for attempt in $(seq 1 "$ATTEMPTS"); do
+    say "rotation attempt ${attempt}/${ATTEMPTS}"
+    if rotate_registration; then
+      state_write last-rotated
+      say "rotation complete; proxy ${PROXY} is reachable"
+      exit 0
+    fi
+    say "rotation attempt ${attempt} failed"
+    [ "$attempt" -lt "$ATTEMPTS" ] && sleep 2
+  done
+
+  state_write last-throttled
+  say "could not restore a reachable WARP proxy after ${ATTEMPTS} attempt(s)"
+  exit 2
+fi
 
 rotated_ok=0
 probe_out="$(mktemp "${TMPDIR:-/tmp}/opencode-warp-probe.XXXXXX")" || {
