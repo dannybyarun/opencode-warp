@@ -5,6 +5,8 @@
  * This is the mid-session companion to the wrapper's launch-time preflight.
  * When a model request fails with 429 / "Free usage limit reached", it rotates
  * the WARP device registration and asks OpenCode to retry the same request.
+ * If a rotation cannot be applied, it vetoes the retry instead of inheriting
+ * the provider's multi-hour retry-after.
  *
  * It only activates when all of these are true:
  *   - opencode is talking through 127.0.0.1:${WARP_PROXY_PORT} (i.e. --stand)
@@ -343,10 +345,17 @@ export default Plugin.define({
       debug(
         `rotation not applied for ${event.sessionID}: ${result.reason ?? `exit ${result.code}`}`,
       )
+      // Do not fall through to OpenCode's proposed policy when we cannot
+      // rotate. The free-tier 429 carries a retry-after measured in hours
+      // (until the UTC reset), which looks like a hung session. Failing the
+      // request immediately is clearer, and a manual retry still works once
+      // the quota resets or a rotation succeeds.
+      event.decision = { retry: false }
       log({
         event: "warp.rotate",
         ok: false,
         reason: result.reason ?? `exit ${result.code}`,
+        gaveUp: true,
         sessionID: event.sessionID,
         agent: event.agent,
         model: event.model,

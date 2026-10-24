@@ -164,6 +164,12 @@ When a model request fails with 429 / `Free usage limit reached`, the plugin:
    deadlock the session that is waiting for the rotation,
 3. sets OpenCode's retry decision to retry the same request after 1.5 seconds.
 
+If a rotation cannot be applied — the per-session cap is reached, a cooldown is
+active, or the helper fails — the plugin vetoes the retry. The request fails
+immediately instead of falling back to the provider's `retry-after`, which for
+the free tier is often several hours (until the 00:00 UTC reset) and looks like
+a hung session.
+
 One rotation is shared by all sessions. A successful rotation is offered to
 other sessions for 5 seconds without creating another registration; the
 session that used it will not rotate again inside that window. Each session is
