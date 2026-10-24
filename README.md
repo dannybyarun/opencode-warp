@@ -117,8 +117,17 @@ Being explicit, because it matters:
 - **It does not rotate IPs.** There is no loop here that cycles WARP addresses
   to avoid being throttled. Deliberately so.
 - **It does not guarantee a different IP every run.** WARP assigns you an
-  address from Cloudflare's own pool; you cannot choose one, and `warp-cli
-  reconnect` only *may* give you a new one.
+  address from Cloudflare's own pool; you cannot choose one. To try for a
+  different one:
+
+  ```bash
+  warp-cli --accept-tos disconnect && warp-cli --accept-tos connect   # often the same address
+  warp-cli --accept-tos registration delete && warp-cli --accept-tos registration new \
+    && warp-cli --accept-tos mode proxy && warp-cli --accept-tos connect   # new device identity
+  ```
+
+  Note: there is **no `reconnect` subcommand** — `warp-cli --accept-tos
+  reconnect` fails with *unrecognized subcommand*. Use the two above.
 
 ### What we actually observed
 
@@ -149,6 +158,7 @@ succeed, so the effect looks like nothing.
 | `setup.sh` | installer (idempotent, safe to re-run) |
 | `opencode-warp` | the wrapper; installed to `/usr/local/bin` |
 | `uninstall.sh` | removes the wrapper, bashrc block, apt repo |
+| `probe.sh` | one-shot verdict: is this ingress throttled? (`0` ok, `1` throttled, `2` no verdict) |
 
 `setup.sh` creates a timestamped backup of `~/.bashrc` before editing it.
 
