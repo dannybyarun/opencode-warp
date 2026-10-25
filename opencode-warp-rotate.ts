@@ -23,7 +23,7 @@ import { spawn } from "node:child_process"
 import { access, appendFile, mkdir } from "node:fs/promises"
 import { constants } from "node:fs"
 import { homedir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, extname, join } from "node:path"
 
 type Options = {
   enabled?: boolean
@@ -109,7 +109,7 @@ function freeModel(model: { providerID?: string; id?: string } | undefined): boo
 
 function quotaError(error: { type?: string; message?: string; status?: number }): boolean {
   if (error.status === 429) return true
-  return /free usage limit|rate.?limit|too many requests|quota|429/i.test(
+  return /free usage limit|free messages|rate.?limit|too many requests|quota|429/i.test(
     `${error.type ?? ""} ${error.message ?? ""}`,
   )
 }
@@ -152,22 +152,106 @@ function log(row: Record<string, unknown>): void {
   void logEvent({ ts: new Date().toISOString(), source: "opencode-warp-plugin", ...row })
 }
 
+/**
+ * Platform selection is overridable so the Windows spawn path can be exercised
+ * on Linux CI. Production always uses process.platform.
+ */
+function isWindows(): boolean {
+  return (process.env.OPENCODE_WARP_TEST_PLATFORM || process.platform) === "win32"
+}
+
+function windowsLocalAppData(): string {
+  return process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local")
+}
+
 async function findScript(override?: string): Promise<string | undefined> {
-  const candidates = [
-    override,
-    process.env.OPENCODE_WARP_ROTATE,
-    "/usr/local/lib/opencode-warp/warp-rotate.sh",
-  ]
+  const candidates = isWindows()
+    ? [
+        override,
+        process.env.OPENCODE_WARP_ROTATE,
+        join(windowsLocalAppData(), "opencode-warp", "bin", "warp-rotate.ps1"),
+        join(windowsLocalAppData(), "opencode-warp", "bin", "warp-rotate.cmd"),
+      ]
+    : [
+        override,
+        process.env.OPENCODE_WARP_ROTATE,
+        "/usr/local/lib/opencode-warp/warp-rotate.sh",
+      ]
+
+  const mode = isWindows() ? constants.F_OK : constants.X_OK
   for (const candidate of candidates) {
     if (!candidate) continue
     try {
-      await access(candidate, constants.X_OK)
+      await access(candidate, mode)
       return candidate
     } catch {
       // try the next path
     }
   }
   return undefined
+}
+
+function rotationInvocation(script: string): {
+  command: string
+  args: string[]
+  verbatim?: boolean
+} {
+  if (!isWindows()) return { command: script, args: ["--rotate-only"] }
+
+  const extension = extname(script).toLowerCase()
+  if (extension === ".ps1") {
+    return {
+      command: process.env.OPENCODE_WARP_POWERSHELL || "powershell.exe",
+      args: [
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        script,
+        "--rotate-only",
+      ],
+    }
+  }
+  if (extension === ".cmd" || extension === ".bat") {
+    // cmd.exe /s /c strips its first and last quote. Wrapping the quoted
+    // script path in one extra pair keeps paths such as
+    // C:\Program Files\nodejs\warp-rotate.cmd intact. Building the whole
+    // command string here and passing it verbatim avoids Node adding its own
+    // (single) layer of quoting.
+    return {
+      command: process.env.ComSpec || "cmd.exe",
+      args: ["/d", "/s", "/c", `""${script}" --rotate-only"`],
+      verbatim: true,
+    }
+  }
+  return { command: script, args: ["--rotate-only"] }
+}
+
+function killRotationTree(child: ReturnType<typeof spawn>): void {
+  if (isWindows() && child.pid) {
+    try {
+      const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      })
+      killer.on("error", () => {
+        try {
+          child.kill()
+        } catch {
+          // already gone
+        }
+      })
+      return
+    } catch {
+      // fall through to child.kill
+    }
+  }
+  try {
+    child.kill("SIGKILL")
+  } catch {
+    // already gone
+  }
 }
 
 function runRotation(
@@ -178,9 +262,12 @@ function runRotation(
     let output = ""
     let settled = false
     let timer: ReturnType<typeof setTimeout> | undefined
-    const child = spawn(script, ["--rotate-only"], {
+    const invocation = rotationInvocation(script)
+    const child = spawn(invocation.command, invocation.args, {
       env: { ...process.env, OPENCODE_WARP_NO_ROTATE: "1" },
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: isWindows(),
+      windowsVerbatimArguments: invocation.verbatim === true,
     })
 
     const finish = (code: number) => {
@@ -192,11 +279,7 @@ function runRotation(
 
     timer = setTimeout(() => {
       output += "\n[rotation timed out]"
-      try {
-        child.kill("SIGKILL")
-      } catch {
-        // already gone
-      }
+      killRotationTree(child)
       // Do not wait for `close`: a grandchild that inherited the pipes can keep
       // them open long after the script itself is gone.
       finish(124)

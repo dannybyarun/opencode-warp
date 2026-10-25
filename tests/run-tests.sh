@@ -75,6 +75,11 @@ say_probe throttled '#!/usr/bin/env bash
 echo "Error: Free usage limit reached"
 exit 1'
 
+say_probe free_messages '#!/usr/bin/env bash
+echo "You'"'"'ve used today'"'"'s free messages. They reset at 12:00 AM."
+echo "Upgrade to OpenCode Go"
+exit 1'
+
 say_probe transport '#!/usr/bin/env bash
 trap "exit 143" TERM
 echo "Error: Transport: ECONNRESET: The socket connection was closed unexpectedly."
@@ -95,6 +100,10 @@ check_contains "$TMP/probe.stdout" 'RESULT: SUCCESS' "probe: success verdict pri
 run_probe throttled
 check_rc 1 "probe: 429 wording is throttled"
 check_contains "$TMP/probe.stdout" 'RESULT: THROTTLED' "probe: throttled verdict printed"
+
+run_probe free_messages
+check_rc 1 "probe: today's-free-messages notice is throttled"
+check_contains "$TMP/probe.stdout" 'RESULT: THROTTLED' "probe: free-messages verdict printed"
 
 started=$(date +%s)
 run_probe transport 20
@@ -238,14 +247,17 @@ rc=$(sed -n "${n}p" "$CURL_RCS")
 exit "$rc"'
 
 run_wrapper() {
-  local rotate_rc=$1 curl_rcs=$2 strict=${3:-0}
+  local rotate_rc=$1 curl_rcs=$2 strict=${3:-0} force_probe=${4:-1} log_path=${5:-}
   printf '%s\n' "$curl_rcs" >"$TMP/curl-rcs"
   : >"$TMP/curl-seq"
   : >"$TMP/opencode.log"
   PATH="$TMP/fakeopencode:$TMP/fakecurl:$PATH" \
   OPCODE_REAL="$TMP/fakeopencode/opencode" \
+  HOME="$TMP/fakehome" \
+  XDG_DATA_HOME="$TMP/xdgdata" \
   XDG_CACHE_HOME="$TMP/wcache" \
-  OPENCODE_WARP_FORCE_PROBE=1 \
+  OPENCODE_WARP_FORCE_PROBE="$force_probe" \
+  OPENCODE_WARP_LOG="$log_path" \
   OPENCODE_WARP_ROTATE_STRICT="$strict" \
   FAKE_ROTATE_RC="$rotate_rc" \
   CURL_SEQ="$TMP/curl-seq" \
@@ -286,6 +298,16 @@ check_contains "$TMP/opencode.log" 'standalone' "wrapper: exhausted recovery sti
 
 run_wrapper 1 "0" 1
 check_rc 1 "wrapper: strict mode keeps exhausted recovery fatal"
+
+# The TUI's "today's free messages" notice must also trigger the preflight,
+# without OPENCODE_WARP_FORCE_PROBE.
+stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+cat >"$TMP/wrap-rate.log" <<EOF
+timestamp=$stamp level=ERROR message="You've used today's free messages. They reset at 12:00 AM."
+EOF
+run_wrapper 0 "0" 0 "" "$TMP/wrap-rate.log"
+check_rc 0 "wrapper: free-message log triggers recovery"
+check_contains "$TMP/wrap.stderr" 'fake rotate rc=0' "wrapper: free-message log rotated WARP"
 
 # ------------------------------------------------------------------ summary
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

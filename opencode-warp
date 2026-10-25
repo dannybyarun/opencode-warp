@@ -61,7 +61,7 @@ last_rate_limit_epoch() {
   log="$(find_opencode_log)" || return 1
   # `level=ERROR` matters: command lines are logged at INFO and can contain
   # the literal text "429", which must not count as a throttle.
-  line="$(grep -E '^timestamp=[^ ]+ level=ERROR .*(Free usage limit reached|Rate limit exceeded|QuotaExceeded|Too Many Requests|HTTP 429|status[=: ]*429)' "$log" 2>/dev/null | tail -n 1)" || return 1
+  line="$(grep -E '^timestamp=[^ ]+ level=ERROR .*(Free usage limit reached|[Ff]ree messages|Rate limit exceeded|QuotaExceeded|Too Many Requests|HTTP 429|status[=: ]*429)' "$log" 2>/dev/null | tail -n 1)" || return 1
   [ -n "$line" ] || return 1
   ts="${line#timestamp=}"
   ts="${ts%% *}"

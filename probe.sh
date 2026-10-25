@@ -66,10 +66,11 @@ fi
 
 # 2. throttled: match opencode's own wording, not any plugin's bookkeeping
 #    ("Rate limit exceeded" is the 429 text; "Free usage limit reached" is the
-#    daily-free-tier text - both mean the shared bucket is empty for you now)
-if grep -qiE 'rate limit exceeded|free usage limit reached|too many requests|429' "$OUT" 2>/dev/null; then
+#    daily-free-tier text; the TUI may instead say "You've used today's free
+#    messages" - all mean the shared bucket is empty for you now)
+if grep -qiE 'rate limit exceeded|free usage limit reached|free messages|too many requests|429' "$OUT" 2>/dev/null; then
   echo "RESULT: THROTTLED (exit $rc)"
-  grep -iE 'rate limit exceeded|free usage limit reached|too many requests|429' "$OUT" | head -2 | sed 's/^/  opencode said: /'
+  grep -iE 'rate limit exceeded|free usage limit reached|free messages|too many requests|429' "$OUT" | head -2 | sed 's/^/  opencode said: /'
   if [ -f "$LOG" ]; then
     python3 - "$LOG" <<'PY' 2>/dev/null || true
 import json, sys, datetime
