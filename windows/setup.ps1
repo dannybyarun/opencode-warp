@@ -588,6 +588,14 @@ Write-Host @"
     opencode-stand run -m <model> "hello"
     opencode-warp run -m <model> "hello"
 
+  API-only server (no --standalone):
+
+    opencode --stand serve --port 4096
+    opencode --stand run --server <url> ...   # client for an existing server
+
+  `serve` prints a password; set `$env:OPENCODE_PASSWORD` when connecting
+  clients with an explicit --server URL.
+
   If opencode's log shows a recent rate-limit error, --stand first checks the
   WARP ingress and rotates the anonymous registration when it is throttled:
 
@@ -604,6 +612,6 @@ Write-Host @"
 
     $(Join-Path (Get-OpenCodeConfigDir) "plugins\opencode-warp-rotate.ts")
 
-  NOTE: the 'run' subcommand is still required - --stand only injects
-  --standalone, it does not invent the subcommand.
+  NOTE: the 'run' subcommand is still required for one-shot prompts; --stand
+  only adds --standalone (except for serve/--server, which must not get it).
 "@

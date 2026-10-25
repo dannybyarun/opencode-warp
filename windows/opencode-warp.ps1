@@ -11,7 +11,9 @@
 #                                dies with `service.ensure` errors
 #
 # Plus `--standalone`, because the background service is what actually makes
-# inference calls. Env vars on the CLI alone never reach it.
+# inference calls. Env vars on the CLI alone never reach it. Two modes are
+# exempt: `serve` is already a foreground server (and rejects --standalone),
+# and `--server` connects to a server whose egress this process does not own.
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")
@@ -29,6 +31,72 @@ if ($allArgs.Count -gt 0 -and $allArgs[0] -eq "--stand") {
     $allArgs = @()
   } else {
     $allArgs = $allArgs[1..($allArgs.Count - 1)]
+  }
+}
+
+# --------------------------------------------------------------- run mode
+# `serve` starts a foreground server: it rejects --standalone, and the server
+# process itself owns the inference egress. `--server` connects to a server
+# someone else started, so its egress is that server's business. Every other
+# invocation gets --standalone, because the shared background service
+# otherwise makes the inference calls outside this environment.
+$mode = "standalone"
+# Skip values of flags that take one, so a prompt that literally says
+# "--server" cannot turn a normal run into a passthrough.
+$needServerValue = $false
+foreach ($argument in $allArgs) {
+  if ($needServerValue) { $needServerValue = $false; continue }
+  $text = [string]$argument
+  if ($text -eq "--server") {
+    $mode = "server"
+    $needServerValue = $true
+    continue
+  }
+  if ($text -like "--server=*") {
+    $mode = "server"
+    continue
+  }
+  if ($text -match "^(--session|-s|--prompt|--log-level|--completions|--model|-m)$") {
+    $needServerValue = $true
+  }
+}
+
+if ($mode -ne "server") {
+  $firstCommand = ""
+  $needValue = $false
+  foreach ($argument in $allArgs) {
+    if ($needValue) { $needValue = $false; continue }
+    $text = [string]$argument
+    if ($text -match "^(--session|-s|--prompt|--log-level|--completions|--model|-m)$") {
+      $needValue = $true
+      continue
+    }
+    if ($text -match "^--") { continue }
+    $firstCommand = $text
+    break
+  }
+  if ($firstCommand -eq "serve") { $mode = "serve" }
+}
+
+$opencode = Find-OpenCode
+if (-not $opencode) {
+  [Console]::Error.WriteLine("opencode-warp: cannot find the opencode binary")
+  [Console]::Error.WriteLine("  install opencode first, or set OPENCODE_WARP_OPENCODE=/path/to/opencode")
+  exit 127
+}
+
+if ($mode -eq "server") {
+  # Do not inject the proxy env here: the target server owns its own egress,
+  # and proxying this client's connection to a remote server through the local
+  # WARP proxy would be wrong. No preflight either.
+  try {
+    & $opencode @allArgs
+    $code = $LASTEXITCODE
+    if ($null -eq $code) { $code = 0 }
+    exit $code
+  } catch {
+    [Console]::Error.WriteLine("opencode-warp: failed to start opencode: " + $_.Exception.Message)
+    exit 1
   }
 }
 
@@ -71,18 +139,11 @@ if ($requestedModel -and $requestedModel -notmatch "free") {
   $autoRotate = $false
 }
 
-$opencode = Find-OpenCode
-if (-not $opencode) {
-  [Console]::Error.WriteLine("opencode-warp: cannot find the opencode binary")
-  [Console]::Error.WriteLine("  install opencode first, or set OPENCODE_WARP_OPENCODE=/path/to/opencode")
-  exit 127
-}
-
 # Guard against a future opencode that drops `--standalone`. Without it the
 # proxy env vars would be silently ignored (the background service makes the
 # inference calls) and opencode would quietly use normal egress. Failing loudly
-# beats degrading silently.
-if (-not (Test-OpenCodeStandalone $opencode)) {
+# beats degrading silently. `serve` and `--server` never get the flag.
+if ($mode -eq "standalone" -and -not (Test-OpenCodeStandalone $opencode)) {
   $version = Get-OpenCodeVersion $opencode
   [Console]::Error.WriteLine('opencode-warp: this opencode has no "run --standalone" flag')
   [Console]::Error.WriteLine("  version: $version")
@@ -140,10 +201,15 @@ if (Test-PreflightNeeded) {
     $env:PROBE_MODEL = $requestedModel
   }
 
-  $rotation = Invoke-ScriptCaptured -ScriptPath $rotate -Environment @{
-    PROBE_RUN             = $self
-    OPENCODE_WARP_NO_ROTATE = "1"
-  } -TimeoutSec 600
+  # probe.ps1 defaults to a raw API request for opencode models. Only hand it
+  # the wrapper path when the probe has to go through `opencode run` (a
+  # third-party provider), because PROBE_RUN forces CLI mode.
+  $rotationEnv = @{ OPENCODE_WARP_NO_ROTATE = "1" }
+  if ($requestedModel -and $requestedModel -notmatch "^opencode/") {
+    $rotationEnv["PROBE_RUN"] = $self
+  }
+
+  $rotation = Invoke-ScriptCaptured -ScriptPath $rotate -Environment $rotationEnv -TimeoutSec 600
   $rc = $rotation.ExitCode
   $rotationText = $rotation.Output.TrimEnd()
   if ($rotationText) {
@@ -186,7 +252,8 @@ $env:http_proxy = $proxy
 $env:NO_PROXY = "127.0.0.1,localhost,::1"
 $env:no_proxy = "127.0.0.1,localhost,::1"
 
-$finalArgs = @($allArgs) + @("--standalone")
+$finalArgs = @($allArgs)
+if ($mode -eq "standalone") { $finalArgs += "--standalone" }
 try {
   & $opencode @finalArgs
   $code = $LASTEXITCODE

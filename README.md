@@ -122,14 +122,17 @@ the stale `opencode-ai` package.
 
 ## Survives opencode upgrades
 
-The wrapper depends on `run --standalone`. If a future opencode removed that
-flag, the proxy env vars would be **silently ignored** (the background service
-is what actually makes inference calls) and opencode would quietly burn your
-normal quota — the worst possible failure, because it looks like success.
+The wrapper depends on `run --standalone` for `run` and TUI sessions. If a
+future opencode removed that flag, the proxy env vars would be **silently
+ignored** (the background service is what actually makes inference calls) and
+opencode would quietly burn your normal quota — the worst possible failure,
+because it looks like success.
 
 So `setup.sh` / `setup.ps1` and both wrappers **feature-detect** `--standalone`
 and refuse to run without it, printing the offending version. Loud failure
-beats silent fallthrough.
+beats silent fallthrough. `serve` and `--server` are exempt because they never
+get the flag: `serve` already owns a foreground server, and `--server`'s
+server owns the egress.
 
 ---
 
@@ -139,13 +142,15 @@ beats silent fallthrough.
 |---|---|
 | `opencode --stand run -m <model> "msg"` | bash/PowerShell: through WARP, adds `--standalone`, auto-recovers if throttled |
 | `opencode --stand` | bash/PowerShell: TUI, through WARP, auto-recovers if throttled |
+| `opencode --stand serve --port 4096` | API-only server through WARP (no `--standalone`) |
+| `opencode --stand run --server <url> ...` | connect to an existing server; passthrough |
 | `opencode run -m <model> "msg"` | unchanged — normal egress |
 | `opencode-warp run -m <model> "msg"` | same as `--stand`, works in **any** shell |
 | `opencode-stand run -m <model> "msg"` | Windows cmd.exe convenience for `--stand` |
 
-The `run` subcommand is **still required**. `--stand` injects `--standalone`;
-it does not invent the subcommand. Omitting it gives a confusing
-`Did you mean this?` argument error.
+The `run` subcommand is **still required** for one-shot prompts. `--stand`
+injects `--standalone`; it does not invent the subcommand. Omitting it gives a
+confusing `Did you mean this?` argument error.
 
 Use `opencode-warp` directly from scripts, cron, zsh, fish, or cmd.exe — it is a
 plain executable. The `opencode --stand` form is a bash function on Linux/macOS
@@ -200,15 +205,47 @@ Installer options:
 than silently continuing without one. `-SkipWarpInstall` does the same for
 WARP.
 
+## API-only server
+
+`opencode serve` is the headless V2 API and web server. The server process owns
+the inference egress, so it gets the WARP proxy env and **not** `--standalone`
+(opencode rejects that flag on `serve`):
+
+```bash
+opencode --stand serve --hostname 127.0.0.1 --port 4096
+# server listening on http://127.0.0.1:4096
+# server password ...
+```
+
+Clients connect to it. They do not need WARP themselves; the server does the
+inference calls:
+
+```bash
+OPENCODE_PASSWORD=<password> opencode --server http://127.0.0.1:4096
+OPENCODE_PASSWORD=<password> opencode run --server http://127.0.0.1:4096 -m opencode/deepseek-v4.1-flash-free "hello"
+OPENCODE_PASSWORD=<password> opencode api --server http://127.0.0.1:4096 get /api/info
+```
+
+`--server` is a per-subcommand flag, so it goes **after** `run`/`api` (or on
+the bare TUI command, which has no subcommand). The wrapper recognises it
+anywhere in the argument list and stays out of the way.
+
+`opencode --stand run --server <url> ...` is a passthrough: it adds neither
+`--standalone` nor the proxy env, because the target server owns its egress.
+It exists so the shortcut does not break when you point it at a server.
+
+
 ---
 
 ## Why these flags exist
 
 Two failure modes are easy to hit, and both were found the hard way:
 
-1. **`--standalone` is mandatory.** opencode's *background service* is what
-   actually makes inference calls. Env vars on the CLI never reach it, so
-   without `--standalone` the proxy is silently unused.
+1. **`--standalone` is mandatory for `run`/TUI.** opencode's *background
+   service* is what actually makes inference calls. Env vars on the CLI never
+   reach it, so without `--standalone` the proxy is silently unused. `serve`
+   is already a foreground server (and rejects the flag); `--server` connects
+   to a server whose egress this process does not own.
 2. **`NO_PROXY` is mandatory.** Without `NO_PROXY=127.0.0.1,localhost`, opencode
    proxies its own local service traffic, gets `502`s, and dies with
    `service.ensure` errors.
@@ -225,7 +262,9 @@ The wrapper handles both. If you drive opencode another way, you must too.
    It only probes when that error is newer than the last successful check, so
    healthy launches do not pay for an extra request.
 2. `probe.sh` (Linux) or `probe.ps1` (Windows) sends one tiny `PONG` request
-   through WARP.
+   through WARP to the same OpenAI-compatible endpoint OpenCode uses
+   (`https://opencode.ai/inference/openai/v1/chat/completions`, bearer token
+   `public`). It does not start opencode and does not create a session.
 3. If throttled, `warp-rotate.sh` / `warp-rotate.ps1` deletes the anonymous
    WARP registration, creates a new one, reconnects in proxy mode, and probes
    again. It retries up to `WARP_ROTATE_ATTEMPTS` times (default 2), then warns
@@ -249,9 +288,9 @@ silent hang), the wrapper starts opencode **only if the local WARP proxy is
 reachable**, and prints a warning. It refuses to start when the proxy itself is
 down, or when `OPENCODE_WARP_ROTATE_STRICT=1` is set.
 
-Each probe is a real `opencode run` (one short `PONG` request), so it creates
-a small session and counts against your quota. That is why the log hint is
-used instead of probing on every launch.
+Each probe is a real model request (one short `PONG`), so it counts against
+your free-tier quota. It no longer creates a session or starts the CLI, which
+is why the log hint is still used instead of probing on every launch.
 
 | Variable | Meaning |
 |---|---|
@@ -260,6 +299,11 @@ used instead of probing on every launch.
 | `WARP_ROTATE_ATTEMPTS=3` | registration attempts (default 2) |
 | `OPENCODE_WARP_ROTATE_STRICT=1` | exit instead of starting opencode when recovery fails or no verdict is available |
 | `OPENCODE_WARP_LOG=/path` | use a specific opencode log |
+| `PROBE_MODE=cli` | probe through `opencode run` instead of the raw API |
+| `PROBE_API_URL=...` | override the chat-completions endpoint |
+| `PROBE_API_KEY=...` | bearer token for the probe (default `public`) |
+| `PROBE_MODEL=...` | model id for the probe (default `opencode/deepseek-v4.1-flash-free`) |
+| `PROBE_DIRECT=1` | bypass the WARP proxy for the probe (same as `PROXY=""`) |
 | `OPENCODE_WARP_HOME=/path` | Windows per-user root (default `%LOCALAPPDATA%\opencode-warp`) |
 | `OPENCODE_WARP_STATE_DIR=/path` | override the `last-ok` / `last-throttled` state directory |
 | `OPENCODE_WARP_WARP_CLI=/path/warp-cli.exe` | Windows: override the WARP CLI path |
@@ -281,7 +325,7 @@ When a model request fails with 429 / `Free usage limit reached`, or reports
 
 1. records `retry-after` and `cf-ray` in the 429 log,
 2. runs `warp-rotate.sh --rotate-only` on Linux or
-   `warp-rotate.ps1 --rotate-only` on Windows — no nested `opencode run`, so it
+   `warp-rotate.ps1 --rotate-only` on Windows — no extra probe request, so it
    cannot deadlock the session that is waiting for the rotation,
 3. sets OpenCode's retry decision to retry the same request after 1.5 seconds.
 
@@ -326,7 +370,7 @@ Manual recovery uses the same code path:
 # Linux
 ./warp-rotate.sh               # probe, rotate only if throttled
 ./warp-rotate.sh --force       # always rotate, then probe
-./warp-rotate.sh --rotate-only # rotate and verify the proxy, no opencode probe
+./warp-rotate.sh --rotate-only # rotate and verify the proxy, no model probe
 ./probe.sh                     # one-shot verdict, never rotates
 ```
 
@@ -353,6 +397,10 @@ CLI supports it.
   (`opencode.ai/inference`) enforces a daily quota that resets at **00:00 UTC**.
   Switching IP does not remove the cap; it may move you to a different
   bucket, or it may not.
+- **The endpoint is not client-locked.** The same `Authorization: Bearer
+  public` credential OpenCode uses works from any HTTP client. What limits you
+  is the free bucket, not the OpenCode client identity — so an API-only server
+  or a direct `curl` hits exactly the same quota.
 - **It does not guarantee a different IP.** WARP assigns an address from
   Cloudflare's own pool; you cannot choose one. That is why the helper probes
   after each rotation instead of assuming success.
@@ -408,7 +456,7 @@ succeed, so the effect looks like nothing.
 | `setup.sh` | Linux installer (idempotent, safe to re-run) |
 | `opencode-warp` | Linux wrapper; installed to `/usr/local/bin` |
 | `uninstall.sh` | removes the Linux wrapper, helpers, bashrc block, apt repo |
-| `probe.sh` | one-shot verdict: is this ingress throttled? (`0` ok, `1` throttled, `2` no verdict, `3` transport failure) |
+| `probe.sh` | one-shot verdict: is this ingress throttled? Raw API by default; `0` ok, `1` throttled, `2` no verdict, `3` transport failure |
 | `warp-rotate.sh` | probe → rotate device registration → probe (`0` ok, `1` still throttled/failing, `2` no verdict) |
 | `opencode-warp-rotate.ts` | live-session 429 plugin: rotate WARP and retry the request (both platforms) |
 | `windows/setup.ps1` | Windows installer: files, plugin, PATH, profile, WARP, opencode |
@@ -449,13 +497,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\windows\run-tests.ps
 
 Both suites are offline: they stub `opencode`, `warp-cli`, `curl`, and the
 probe, so they never create a WARP registration or spend quota. They cover
-every probe verdict (success, throttled, transport failure, no verdict,
-timeout), transport rotation and exhaustion, `--force` / `--rotate-only`,
-preflight log detection, and the wrapper's strict/fallback startup policy. The
-Windows suite also checks profile install/remove behaviour, the `.cmd` shims,
-and rejects PowerShell 7-only syntax.
+every probe verdict in both API and CLI modes (success, throttled, transport
+failure, no verdict, timeout), transport rotation and exhaustion, `--force` /
+`--rotate-only`, preflight log detection, the wrapper's strict/fallback
+startup policy, and the `serve`/`--server` argument routing. The Windows suite
+also checks profile install/remove behaviour, the `.cmd` shims, and rejects
+PowerShell 7-only syntax.
 
-Expected totals: **47** Linux checks and **132** Windows checks.
+Expected totals: **88** Linux checks and **169** Windows checks.
 
 ---
 

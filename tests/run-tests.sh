@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
 # run-tests.sh - offline regression tests for the probe verdicts, the rotation
-# helper, and the wrapper's startup policy.
+# helper, and the wrapper's startup policy and run modes.
 #
-# Nothing here talks to WARP or to opencode: every external command is stubbed.
-# Run from anywhere:  ./tests/run-tests.sh
+# Nothing here talks to WARP, opencode, or the inference API: every external
+# command is stubbed. Run from anywhere:  ./tests/run-tests.sh
 #
 set -uo pipefail
 
@@ -59,10 +59,12 @@ say_probe() {
 
 run_probe() {
   local name=$1 timeout=${2:-20}
+  PROBE_MODE=cli \
   PROBE_RUN="$TMP/run-$name" \
   PROBE_OUT="$TMP/probe.out" \
   PROBE_TIMEOUT="$timeout" \
   PROXY="http://127.0.0.1:1" \
+  OPENCODE_RATELIMIT_LOG="$TMP/missing-ratelimit.jsonl" \
     "$ROOT/probe.sh" >"$TMP/probe.stdout" 2>"$TMP/probe.stderr"
   RC=$?
 }
@@ -94,42 +96,130 @@ trap "exit 143" TERM
 sleep 30'
 
 run_probe success
-check_rc 0 "probe: PONG is success"
-check_contains "$TMP/probe.stdout" 'RESULT: SUCCESS' "probe: success verdict printed"
+check_rc 0 "probe cli: PONG is success"
+check_contains "$TMP/probe.stdout" 'RESULT: SUCCESS' "probe cli: success verdict printed"
 
 run_probe throttled
-check_rc 1 "probe: 429 wording is throttled"
-check_contains "$TMP/probe.stdout" 'RESULT: THROTTLED' "probe: throttled verdict printed"
+check_rc 1 "probe cli: 429 wording is throttled"
+check_contains "$TMP/probe.stdout" 'RESULT: THROTTLED' "probe cli: throttled verdict printed"
 
 run_probe free_messages
-check_rc 1 "probe: today's-free-messages notice is throttled"
-check_contains "$TMP/probe.stdout" 'RESULT: THROTTLED' "probe: free-messages verdict printed"
+check_rc 1 "probe cli: today's-free-messages notice is throttled"
+check_contains "$TMP/probe.stdout" 'RESULT: THROTTLED' "probe cli: free-messages verdict printed"
+
+"$ROOT/probe.sh" --help >"$TMP/probe-help" 2>&1
+RC=$?
+check_rc 0 "probe: --help exits 0"
+check_contains "$TMP/probe-help" 'PROBE_MODE' "probe: --help documents API mode"
+check_not_contains "$TMP/probe-help" '^set -u$' "probe: --help stops at the header"
 
 started=$(date +%s)
 run_probe transport 20
 elapsed=$(( $(date +%s) - started ))
-check_rc 3 "probe: ECONNRESET is a transport failure"
-check_contains "$TMP/probe.stdout" 'RESULT: TRANSPORT FAILURE' "probe: transport verdict printed"
+check_rc 3 "probe cli: ECONNRESET is a transport failure"
+check_contains "$TMP/probe.stdout" 'RESULT: TRANSPORT FAILURE' "probe cli: transport verdict printed"
 if [ "$elapsed" -le 5 ]; then
-  ok "probe: socket error returns immediately (${elapsed}s)"
+  ok "probe cli: socket error returns immediately (${elapsed}s)"
 else
-  bad "probe: socket error took ${elapsed}s despite early kill"
+  bad "probe cli: socket error took ${elapsed}s despite early kill"
 fi
 
 run_probe auth
-check_rc 2 "probe: auth error remains no verdict"
-check_contains "$TMP/probe.stdout" 'RESULT: NO VERDICT' "probe: no-verdict wording preserved"
+check_rc 2 "probe cli: auth error remains no verdict"
+check_contains "$TMP/probe.stdout" 'RESULT: NO VERDICT' "probe cli: no-verdict wording preserved"
 
 started=$(date +%s)
 run_probe hang 2
 elapsed=$(( $(date +%s) - started ))
-check_rc 2 "probe: silent hang remains no verdict"
-check_contains "$TMP/probe.stdout" 'RESULT: NO VERDICT' "probe: hang verdict printed"
+check_rc 2 "probe cli: silent hang remains no verdict"
+check_contains "$TMP/probe.stdout" 'RESULT: NO VERDICT' "probe cli: hang verdict printed"
 if [ "$elapsed" -le 6 ]; then
-  ok "probe: PROBE_TIMEOUT is honoured (${elapsed}s)"
+  ok "probe cli: PROBE_TIMEOUT is honoured (${elapsed}s)"
 else
-  bad "probe: timeout took ${elapsed}s"
+  bad "probe cli: timeout took ${elapsed}s"
 fi
+
+# ------------------------------------------------------- probe.sh (API mode)
+mkdir -p "$TMP/fakecurlapi"
+
+# One queued HTTP response per probe. Egress is skipped because PROXY is empty.
+write_fake "$TMP/fakecurlapi/curl" '#!/usr/bin/env bash
+out=""; hdr=""; fmt=""; url=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    -D) hdr=$2; shift 2 ;;
+    -w) fmt=$2; shift 2 ;;
+    -H|-d|-x|--max-time) shift 2 ;;
+    -*) shift ;;
+    *) url=$1; shift ;;
+  esac
+done
+n=$(cat "$API_SEQ" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf "%s\n" "$n" >"$API_SEQ"
+rc=$(sed -n "${n}p" "$API_RC" 2>/dev/null); [ -n "$rc" ] || rc=0
+status=$(sed -n "${n}p" "$API_STATUS" 2>/dev/null); [ -n "$status" ] || status=200
+body=$(sed -n "${n}p" "$API_BODY" 2>/dev/null)
+[ -n "$hdr" ] && printf "HTTP/1.1 %s\r\nretry-after: 120\r\ncf-ray: test-ray\r\n\r\n" "$status" >"$hdr"
+[ -n "$out" ] && printf "%s" "$body" >"$out"
+[ -n "$fmt" ] && printf "%s" "$status"
+[ "$rc" = 56 ] && echo "curl: (56) Recv failure: Connection reset by peer" >&2
+exit "$rc"'
+
+run_probe_api() {
+  local status=$1 rc=$2 body=$3 timeout=${4:-20} mode=${5:-api}
+  printf '%s\n' "$status" >"$TMP/api-status"
+  printf '%s\n' "$rc" >"$TMP/api-rc"
+  printf '%s\n' "$body" >"$TMP/api-body"
+  : >"$TMP/api-seq"
+  PATH="$TMP/fakecurlapi:$PATH" \
+  PROBE_MODE="$mode" \
+  PROBE_API_URL="http://api.test/v1/chat/completions" \
+  PROBE_MODEL="opencode/deepseek-v4.1-flash-free" \
+  PROBE_OUT="$TMP/probe-api.out" \
+  PROBE_TIMEOUT="$timeout" \
+  PROXY="" \
+  OPENCODE_RATELIMIT_LOG="$TMP/missing-ratelimit.jsonl" \
+  API_SEQ="$TMP/api-seq" \
+  API_STATUS="$TMP/api-status" \
+  API_RC="$TMP/api-rc" \
+  API_BODY="$TMP/api-body" \
+    "$ROOT/probe.sh" >"$TMP/probe.stdout" 2>"$TMP/probe.stderr"
+  RC=$?
+}
+
+run_probe_api 200 0 '{"choices":[{"message":{"content":"PONG"}}]}'
+check_rc 0 "probe api: HTTP 200 is success"
+check_contains "$TMP/probe.stdout" 'RESULT: SUCCESS' "probe api: success verdict printed"
+check_contains "$TMP/probe.stdout" 'PONG' "probe api: PONG is reported"
+
+run_probe_api 200 0 '{"choices":[{"message":{"content":"hello"}}]}'
+check_rc 0 "probe api: HTTP 200 without PONG is still success"
+
+run_probe_api 429 0 '{"error":{"type":"FreeUsageLimitError","message":"Free usage limit reached."}}'
+check_rc 1 "probe api: HTTP 429 is throttled"
+check_contains "$TMP/probe.stdout" 'RESULT: THROTTLED' "probe api: throttled verdict printed"
+check_contains "$TMP/probe.stdout" 'HTTP 429' "probe api: HTTP status is reported"
+check_contains "$TMP/probe.stdout" 'unblocks' "probe api: retry-after is decoded"
+check_contains "$TMP/probe.stdout" 'test-ray' "probe api: cf-ray is reported"
+
+run_probe_api 000 56 ''
+check_rc 3 "probe api: curl reset is a transport failure"
+check_contains "$TMP/probe.stdout" 'RESULT: TRANSPORT FAILURE' "probe api: transport verdict printed"
+
+run_probe_api 000 28 ''
+check_rc 2 "probe api: curl timeout remains no verdict"
+check_contains "$TMP/probe.stdout" 'RESULT: NO VERDICT' "probe api: timeout verdict printed"
+
+run_probe_api 401 0 '{"error":{"message":"unauthorized"}}'
+check_rc 2 "probe api: 401 remains no verdict"
+
+run_probe_api 500 0 '{"error":"internal"}'
+check_rc 2 "probe api: 500 remains no verdict"
+
+run_probe_api 200 0 '{"choices":[{"message":{"content":"PONG"}}]}' 20 auto
+check_rc 0 "probe api: auto selects the API for opencode models"
 
 # --------------------------------------------------------- warp-rotate.sh
 mkdir -p "$TMP/fakebin" "$TMP/cache"
@@ -230,11 +320,17 @@ exit "$FAKE_ROTATE_RC"'
 write_fake "$TMP/fakeopencode/opencode" '#!/usr/bin/env bash
 case "${1:-}" in
   run)
-    if [ "${2:-}" = "--help" ]; then echo "opencode run --standalone"; exit 0; fi
+    if [ "${2:-}" = "--help" ]; then
+      if [ "${FAKE_NO_STANDALONE:-0}" = "1" ]; then
+        echo "opencode run (no standalone)"; exit 1
+      fi
+      echo "opencode run --standalone"; exit 0
+    fi
     ;;
   --version) echo "opencode fake"; exit 0 ;;
 esac
-printf "%s\n" "$*" >>"$OPENCODE_CALL_LOG"
+printf "HTTPS_PROXY=%s\n" "${HTTPS_PROXY:-}" >>"$OPENCODE_CALL_LOG"
+printf "ARGS=%s\n" "$*" >>"$OPENCODE_CALL_LOG"
 echo "FAKE_OPENCODE_OK"
 exit 0'
 
@@ -247,67 +343,108 @@ rc=$(sed -n "${n}p" "$CURL_RCS")
 exit "$rc"'
 
 run_wrapper() {
-  local rotate_rc=$1 curl_rcs=$2 strict=${3:-0} force_probe=${4:-1} log_path=${5:-}
+  local rotate_rc=$1 curl_rcs=$2 strict=${3:-0}
+  shift 3
   printf '%s\n' "$curl_rcs" >"$TMP/curl-rcs"
   : >"$TMP/curl-seq"
   : >"$TMP/opencode.log"
   PATH="$TMP/fakeopencode:$TMP/fakecurl:$PATH" \
   OPCODE_REAL="$TMP/fakeopencode/opencode" \
-  HOME="$TMP/fakehome" \
-  XDG_DATA_HOME="$TMP/xdgdata" \
   XDG_CACHE_HOME="$TMP/wcache" \
-  OPENCODE_WARP_FORCE_PROBE="$force_probe" \
-  OPENCODE_WARP_LOG="$log_path" \
+  HTTPS_PROXY="" HTTP_PROXY="" https_proxy="" http_proxy="" \
+  NO_PROXY="" no_proxy="" \
+  OPENCODE_WARP_FORCE_PROBE="${FORCE_PROBE:-1}" \
+  OPENCODE_WARP_LOG="${LOG_PATH:-}" \
   OPENCODE_WARP_ROTATE_STRICT="$strict" \
   FAKE_ROTATE_RC="$rotate_rc" \
+  FAKE_NO_STANDALONE="${FAKE_NO_STANDALONE:-0}" \
   CURL_SEQ="$TMP/curl-seq" \
   CURL_RCS="$TMP/curl-rcs" \
   OPENCODE_CALL_LOG="$TMP/opencode.log" \
-    "$TMP/wrap/opencode-warp" --stand run -m opencode/deepseek-v4.1-flash-free "hi" \
-      >"$TMP/wrap.stdout" 2>"$TMP/wrap.stderr"
+    "$TMP/wrap/opencode-warp" "$@" >"$TMP/wrap.stdout" 2>"$TMP/wrap.stderr"
   RC=$?
 }
 
-run_wrapper 0 "0"
+run_wrapper 0 "0" 0 run -m opencode/deepseek-v4.1-flash-free "hi"
 check_rc 0 "wrapper: healthy rotation starts opencode"
-check_contains "$TMP/opencode.log" 'standalone' "wrapper: --standalone still injected"
+check_contains "$TMP/opencode.log" 'ARGS=.*standalone' "wrapper: --standalone still injected"
+check_contains "$TMP/opencode.log" 'HTTPS_PROXY=http://127.0.0.1:40000' "wrapper: run gets WARP env"
 check_contains "$TMP/wrap.stdout" 'FAKE_OPENCODE_OK' "wrapper: opencode actually ran"
 
 run_wrapper 2 "0
-0"
+0" 0 run -m opencode/deepseek-v4.1-flash-free "hi"
 check_rc 0 "wrapper: no verdict starts opencode when proxy is reachable"
 check_contains "$TMP/wrap.stderr" 'could not get a model verdict' "wrapper: no-verdict warning printed"
 check_contains "$TMP/wrap.stderr" 'starting opencode anyway' "wrapper: warning explains the fallback"
 check_contains "$TMP/opencode.log" 'standalone' "wrapper: fallback still uses WARP env"
 
 run_wrapper 2 "0
-1"
+1" 0 run -m opencode/deepseek-v4.1-flash-free "hi"
 check_rc 2 "wrapper: no verdict aborts when proxy is unreachable"
 check_contains "$TMP/wrap.stderr" 'proxy is' "wrapper: proxy failure is named"
-check_not_contains "$TMP/opencode.log" 'standalone' "wrapper: opencode does not run on a broken proxy"
+check_not_contains "$TMP/opencode.log" 'ARGS=' "wrapper: opencode does not run on a broken proxy"
 
 run_wrapper 2 "0
-0" 1
+0" 1 run -m opencode/deepseek-v4.1-flash-free "hi"
 check_rc 2 "wrapper: strict mode keeps no verdict fatal"
 check_contains "$TMP/wrap.stderr" 'OPENCODE_WARP_ROTATE_STRICT=1' "wrapper: strict mode is explained"
 
-run_wrapper 1 "0"
+run_wrapper 1 "0" 0 run -m opencode/deepseek-v4.1-flash-free "hi"
 check_rc 0 "wrapper: exhausted recovery still starts opencode"
 check_contains "$TMP/wrap.stderr" 'did not produce a healthy ingress' "wrapper: neutral recovery warning"
 check_contains "$TMP/opencode.log" 'standalone' "wrapper: exhausted recovery still uses WARP"
 
-run_wrapper 1 "0" 1
+run_wrapper 1 "0" 1 run -m opencode/deepseek-v4.1-flash-free "hi"
 check_rc 1 "wrapper: strict mode keeps exhausted recovery fatal"
 
-# The TUI's "today's free messages" notice must also trigger the preflight,
+# `serve` is already a foreground server: WARP env, but no --standalone.
+run_wrapper 0 "0" 0 serve --port 4096
+check_rc 0 "wrapper: serve starts opencode"
+check_contains "$TMP/opencode.log" 'ARGS=serve --port 4096' "wrapper: serve args are passed through"
+check_not_contains "$TMP/opencode.log" 'standalone' "wrapper: serve does not get --standalone"
+check_contains "$TMP/opencode.log" 'HTTPS_PROXY=http://127.0.0.1:40000' "wrapper: serve gets the WARP env"
+
+run_wrapper 0 "1
+1" 0 serve --port 4096
+check_rc 1 "wrapper: serve refuses a dead WARP proxy"
+check_not_contains "$TMP/opencode.log" 'ARGS=serve' "wrapper: serve does not run on a broken proxy"
+
+FAKE_NO_STANDALONE=1 run_wrapper 0 "0" 0 serve --port 4096
+check_rc 0 "wrapper: serve does not require run --standalone"
+check_contains "$TMP/opencode.log" 'ARGS=serve --port 4096' "wrapper: serve still runs without the flag"
+
+FAKE_NO_STANDALONE=1 run_wrapper 0 "0" 0 run -m opencode/deepseek-v4.1-flash-free "hi"
+check_rc 1 "wrapper: run still requires --standalone"
+check_contains "$TMP/wrap.stderr" 'no "run --standalone" flag' "wrapper: missing flag is explained"
+check_not_contains "$TMP/opencode.log" 'ARGS=' "wrapper: run refuses to fall through silently"
+
+# `--server` points at a server that owns its own egress: pure passthrough.
+run_wrapper 9 "1" 0 run --server http://127.0.0.1:4096 -m opencode/deepseek-v4.1-flash-free "hi"
+check_rc 0 "wrapper: --server is a passthrough"
+check_contains "$TMP/opencode.log" 'ARGS=run --server http://127.0.0.1:4096 -m' "wrapper: --server args are passed through"
+check_not_contains "$TMP/opencode.log" 'standalone' "wrapper: --server does not get --standalone"
+check_not_contains "$TMP/opencode.log" 'HTTPS_PROXY=http' "wrapper: --server does not get the proxy env"
+check_not_contains "$TMP/wrap.stderr" 'fake rotate' "wrapper: --server skips the preflight"
+
+run_wrapper 9 "1" 0 api --server http://127.0.0.1:4096 get /api/info
+check_rc 0 "wrapper: api --server is a passthrough"
+check_contains "$TMP/opencode.log" 'ARGS=api --server http://127.0.0.1:4096 get /api/info' "wrapper: api args are passed through"
+check_not_contains "$TMP/opencode.log" 'standalone' "wrapper: api --server does not get --standalone"
+
+# The TUI's "today's free messages" notice must trigger the preflight even
 # without OPENCODE_WARP_FORCE_PROBE.
 stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 cat >"$TMP/wrap-rate.log" <<EOF
 timestamp=$stamp level=ERROR message="You've used today's free messages. They reset at 12:00 AM."
 EOF
-run_wrapper 0 "0" 0 "" "$TMP/wrap-rate.log"
+FORCE_PROBE=0 LOG_PATH="$TMP/wrap-rate.log" run_wrapper 0 "0" 0 run -m opencode/deepseek-v4.1-flash-free "hi"
 check_rc 0 "wrapper: free-message log triggers recovery"
 check_contains "$TMP/wrap.stderr" 'fake rotate rc=0' "wrapper: free-message log rotated WARP"
+
+# An explicit paid model disables the free-tier rotation.
+FORCE_PROBE=0 LOG_PATH="$TMP/wrap-rate.log" run_wrapper 0 "0" 0 run -m anthropic/claude-sonnet-4 "hi"
+check_rc 0 "wrapper: paid models still run"
+check_not_contains "$TMP/wrap.stderr" 'fake rotate' "wrapper: paid model skips free-tier rotation"
 
 # ------------------------------------------------------------------ summary
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

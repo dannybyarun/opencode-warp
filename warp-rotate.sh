@@ -20,7 +20,7 @@
 #
 # Options:     --force         rotate first, without probing the current ingress
 #              --rotate-only   replace the registration and verify the proxy,
-#                              but do not run an opencode probe (used by the
+#                              but do not run a model probe (used by the
 #                              real-time plugin during a live session)
 #
 # Environment:
@@ -99,8 +99,9 @@ state_write() {
 }
 
 probe_ingress() {
-  # OPENCODE_WARP_NO_ROTATE prevents the wrapper that probe.sh launches from
-  # starting another preflight probe, which would recurse.
+  # OPENCODE_WARP_NO_ROTATE prevents a recursive preflight when the CLI probe
+  # mode launches the wrapper. API mode does not launch opencode, but the guard
+  # is harmless and keeps both modes consistent.
   OPENCODE_WARP_NO_ROTATE=1 "$PROBE" >"$1" 2>&1
 }
 
@@ -168,10 +169,9 @@ rotate_registration() {
   return 1
 }
 
-# Live-session path used by the OpenCode plugin. It must not run an
-# `opencode run` probe: that would start a nested OpenCode inside the session
-# that is waiting for this rotation. Reaching the local proxy is enough; the
-# retried model request is the real throttle test.
+# Live-session path used by the OpenCode plugin. It must not run a model probe:
+# the session that is waiting for this rotation will retry the real request,
+# and that retry is the throttle test. Reaching the local proxy is enough.
 if [ "$ROTATE_ONLY" -eq 1 ]; then
   say "rotate-only: replacing the WARP registration"
   for attempt in $(seq 1 "$ATTEMPTS"); do

@@ -11,7 +11,9 @@
 #                                dies with `service.ensure` errors
 #
 # Plus `--standalone`, because the background service is what actually makes
-# inference calls. Env vars on the CLI alone never reach it.
+# inference calls. Env vars on the CLI alone never reach it. Two modes are
+# exempt: `serve` is already a foreground server (and rejects --standalone),
+# and `--server` connects to a server whose egress this process does not own.
 #
 set -euo pipefail
 
@@ -37,6 +39,56 @@ REAL="$(find_opencode)" || {
   exit 127
 }
 : "${OPCODE_REAL:=$REAL}"
+
+# --------------------------------------------------------------- run mode
+# `serve` starts a foreground server: it rejects --standalone, and the server
+# process itself owns the inference egress. `--server` connects to a server
+# someone else started, so its egress is that server's business. Every other
+# invocation gets --standalone, because the shared background service otherwise
+# makes the inference calls outside this environment.
+MODE=standalone
+# --server can appear before or after the subcommand (`api --server URL ...`),
+# so scan the whole argv for it before looking for the command. Skip values of
+# flags that take one, so a prompt that literally says "--server" cannot turn
+# a normal run into a passthrough.
+_expect_value=0
+for _arg in "$@"; do
+  if [ "$_expect_value" -eq 1 ]; then
+    _expect_value=0
+    continue
+  fi
+  case "$_arg" in
+    --server) MODE=server; _expect_value=1 ;;
+    --server=*) MODE=server ;;
+    --session|-s|--prompt|--log-level|--completions|--model|-m) _expect_value=1 ;;
+  esac
+done
+
+if [ "$MODE" != "server" ]; then
+  _first_command=""
+  _expect_value=0
+  for _arg in "$@"; do
+    if [ "$_expect_value" -eq 1 ]; then
+      _expect_value=0
+      continue
+    fi
+    case "$_arg" in
+      --session|-s|--prompt|--log-level|--completions|--model|-m) _expect_value=1 ;;
+      --*) : ;;
+      *) _first_command="$_arg"; break ;;
+    esac
+  done
+  if [ "$_first_command" = "serve" ]; then
+    MODE=serve
+  fi
+fi
+
+if [ "$MODE" = "server" ]; then
+  # Do not inject the proxy env here: the target server owns its own egress,
+  # and proxying this client's connection to a remote server through the local
+  # WARP proxy would be wrong.
+  exec "$OPCODE_REAL" "$@"
+fi
 
 probe() { curl -s --max-time 5 -x "$PROXY" https://api.ipify.org >/dev/null 2>&1; }
 
@@ -136,17 +188,20 @@ fi
 # back to normal egress. Failing loudly beats degrading silently.
 # NOTE: match with `case`, never `cmd | grep -q` - under `set -o pipefail` a
 # SIGPIPE from grep's early exit turns an exact match into a false result.
-_standalone_help="$($OPCODE_REAL run --help 2>&1 || true)"
-case "$_standalone_help" in
-  *--standalone*) : ;;
-  *)
-    printf 'opencode-warp: this opencode has no "run --standalone" flag\n' >&2
-    printf '  version: %s\n' "$($OPCODE_REAL --version 2>/dev/null | head -1)" >&2
-    printf '  the wrapper requires it; refusing to run, because without it the\n' >&2
-    printf '  proxy would be silently ignored and normal egress used instead.\n' >&2
-    exit 1
-    ;;
-esac
+# `serve` and `--server` never get the flag, so they do not need it to exist.
+if [ "$MODE" = "standalone" ]; then
+  _standalone_help="$($OPCODE_REAL run --help 2>&1 || true)"
+  case "$_standalone_help" in
+    *--standalone*) : ;;
+    *)
+      printf 'opencode-warp: this opencode has no "run --standalone" flag\n' >&2
+      printf '  version: %s\n' "$($OPCODE_REAL --version 2>/dev/null | head -1)" >&2
+      printf '  the wrapper requires it; refusing to run, because without it the\n' >&2
+      printf '  proxy would be silently ignored and normal egress used instead.\n' >&2
+      exit 1
+      ;;
+  esac
+fi
 
 if ! probe; then
   # WARP may simply not be connected yet - try to bring it up rather than fail.
@@ -174,7 +229,14 @@ if preflight_needed; then
   fi
 
   rc=0
-  PROBE_RUN="${PROBE_RUN:-$SELF}" OPENCODE_WARP_NO_ROTATE=1 "$ROTATE" || rc=$?
+  # probe.sh defaults to a raw API request for opencode models. Only hand it
+  # the wrapper path when the probe has to go through `opencode run` (a
+  # third-party provider), because PROBE_RUN forces CLI mode.
+  case "$requested_model" in
+    ''|opencode/*) : ;;
+    *) export PROBE_RUN="${PROBE_RUN:-$SELF}" ;;
+  esac
+  OPENCODE_WARP_NO_ROTATE=1 "$ROTATE" || rc=$?
   case "$rc" in
     0) ;;
     1)
@@ -202,9 +264,21 @@ if preflight_needed; then
   esac
 fi
 
-exec env \
-  HTTPS_PROXY="$PROXY" \
-  HTTP_PROXY="$PROXY" \
-  NO_PROXY="127.0.0.1,localhost,::1" \
-  no_proxy="127.0.0.1,localhost,::1" \
-  "$OPCODE_REAL" "$@" --standalone
+case "$MODE" in
+  serve)
+    exec env \
+      HTTPS_PROXY="$PROXY" \
+      HTTP_PROXY="$PROXY" \
+      NO_PROXY="127.0.0.1,localhost,::1" \
+      no_proxy="127.0.0.1,localhost,::1" \
+      "$OPCODE_REAL" "$@"
+    ;;
+  *)
+    exec env \
+      HTTPS_PROXY="$PROXY" \
+      HTTP_PROXY="$PROXY" \
+      NO_PROXY="127.0.0.1,localhost,::1" \
+      no_proxy="127.0.0.1,localhost,::1" \
+      "$OPCODE_REAL" "$@" --standalone
+    ;;
+esac

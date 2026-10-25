@@ -114,10 +114,13 @@ $clean = @(
   "OPENCODE_WARP_NO_ROTATE", "OPENCODE_WARP_FORCE_PROBE", "OPENCODE_WARP_AUTO_ROTATE",
   "OPENCODE_WARP_ROTATE_STRICT", "OPCODE_REAL", "WARP_ROTATE_ATTEMPTS",
   "WARP_PROXY_PORT", "PROBE_RUN", "PROBE_MODEL", "PROBE_OUT", "PROBE_TIMEOUT",
+  "PROBE_MODE", "PROBE_API_URL", "PROBE_API_KEY", "PROBE_HDR", "PROBE_DIRECT",
+  "OPENCODE_RATELIMIT_LOG",
+  "PROBE_SEQ", "PROBE_RCS", "CURL_SEQ", "CURL_RCS", "WARPTEST_LOG",
+  "API_STATUS", "API_BODY", "API_RC",
+  "OPENCODE_CALL_LOG", "ROTATE_LOG", "FAKE_ROTATE_RC", "FAKE_ROTATE_OUTPUT",
   "PROXY", "HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy",
   "NO_PROXY", "no_proxy", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
-  "PROBE_SEQ", "PROBE_RCS", "CURL_SEQ", "CURL_RCS", "WARPTEST_LOG",
-  "OPENCODE_CALL_LOG", "ROTATE_LOG", "FAKE_ROTATE_RC", "FAKE_ROTATE_OUTPUT",
   "APPDATA", "LOCALAPPDATA"
 )
 foreach ($name in $clean) {
@@ -185,6 +188,42 @@ if ($args -match "cdn-cgi/trace") {
 exit 0
 '@
 
+# API-mode curl stub: writes a body and headers, then prints the status marker
+# the probe parses. One response per process, driven by API_* env vars.
+$apiCurlMock = Join-Path $Tmp "mock-api-curl.ps1"
+Write-Mock $apiCurlMock @'
+$out = ""
+$hdr = ""
+$fmt = ""
+$i = 0
+while ($i -lt $args.Count) {
+  $a = [string]$args[$i]
+  if ($a -ceq "-o") { $i++; $out = [string]$args[$i] }
+  elseif ($a -ceq "-D") { $i++; $hdr = [string]$args[$i] }
+  elseif ($a -ceq "-w") { $i++; $fmt = [string]$args[$i] }
+  elseif ($a -ceq "-H" -or $a -ceq "-d" -or $a -ceq "-x" -or $a -ceq "--max-time") { $i++ }
+  $i++
+}
+
+$status = "200"
+if ($env:API_STATUS) { $status = $env:API_STATUS }
+$body = ""
+if ($env:API_BODY) { $body = $env:API_BODY }
+$rc = 0
+if ($env:API_RC) { $rc = [int]$env:API_RC }
+
+$encoding = New-Object System.Text.UTF8Encoding($false)
+if ($hdr) {
+  [IO.File]::WriteAllText($hdr, "HTTP/1.1 $status`r`nretry-after: 120`r`ncf-ray: test-ray`r`n`r`n", $encoding)
+}
+if ($out) { [IO.File]::WriteAllText($out, $body, $encoding) }
+if ($fmt) { Write-Output ("HTTPSTATUS:" + $status) }
+if ($rc -eq 56) {
+  [Console]::Error.WriteLine("curl: (56) Recv failure: Connection reset by peer")
+}
+exit $rc
+'@
+
 # ---------------------------------------------------------------- probe.ps1
 $probe = Join-Path $Windows "probe.ps1"
 
@@ -240,6 +279,7 @@ function Invoke-Probe {
     PROXY                    = "http://127.0.0.1:1"
     OPENCODE_WARP_CURL       = $traceMock
     OPENCODE_WARP_POWERSHELL = $PS
+    OPENCODE_RATELIMIT_LOG   = (Join-Path $Tmp "missing-ratelimit.jsonl")
   }
 }
 
@@ -280,6 +320,67 @@ if ($elapsed -le 10) {
 } else {
   Fail ("probe: timeout took {0:N0}s" -f $elapsed)
 }
+
+# ------------------------------------------------------- probe.ps1 (API mode)
+function Invoke-ProbeApi {
+  param(
+    [string]$Status = "200",
+    [int]$CurlRc = 0,
+    [string]$Body = "",
+    [string]$Mode = "api"
+  )
+  $out = Join-Path $Tmp ("probe-api-" + [Guid]::NewGuid().ToString("N") + ".out")
+  return Invoke-Child -Script $probe -Environment @{
+    PROBE_MODE               = $Mode
+    PROBE_API_URL            = "http://api.test/v1/chat/completions"
+    PROBE_API_KEY            = "public"
+    PROBE_MODEL              = "opencode/deepseek-v4.1-flash-free"
+    PROBE_OUT                = $out
+    PROBE_TIMEOUT            = "20"
+    PROBE_DIRECT             = "1"
+    OPENCODE_WARP_CURL       = $apiCurlMock
+    OPENCODE_WARP_POWERSHELL = $PS
+    OPENCODE_RATELIMIT_LOG   = (Join-Path $Tmp "missing-ratelimit.jsonl")
+    API_STATUS               = $Status
+    API_BODY                 = $Body
+    API_RC                   = [string]$CurlRc
+  }
+}
+
+$result = Invoke-ProbeApi -Body '{"choices":[{"message":{"content":"PONG"}}]}'
+Check-Rc 0 "probe api: HTTP 200 is success" $result
+Check-Contains $result.Out "RESULT: SUCCESS" "probe api: success verdict printed"
+Check-Contains $result.Out "PONG" "probe api: PONG is reported"
+
+$result = Invoke-ProbeApi -Body '{"choices":[{"message":{"content":"hello"}}]}'
+Check-Rc 0 "probe api: HTTP 200 without PONG is still success" $result
+
+$result = Invoke-ProbeApi -Status "429" -Body '{"error":{"type":"FreeUsageLimitError","message":"Free usage limit reached."}}'
+Check-Rc 1 "probe api: HTTP 429 is throttled" $result
+Check-Contains $result.Out "RESULT: THROTTLED" "probe api: throttled verdict printed"
+Check-Contains $result.Out "HTTP 429" "probe api: HTTP status is reported"
+Check-Contains $result.Out "unblocks" "probe api: retry-after is decoded"
+Check-Contains $result.Out "test-ray" "probe api: cf-ray is reported"
+
+$result = Invoke-ProbeApi -Status "403" -Body '{"error":{"message":"You have used today''s free messages."}}'
+Check-Rc 1 "probe api: free-messages wording is throttled" $result
+
+$result = Invoke-ProbeApi -Status "000" -CurlRc 56
+Check-Rc 3 "probe api: curl reset is a transport failure" $result
+Check-Contains $result.Out "RESULT: TRANSPORT FAILURE" "probe api: transport verdict printed"
+
+$result = Invoke-ProbeApi -Status "000" -CurlRc 28
+Check-Rc 2 "probe api: curl timeout remains no verdict" $result
+Check-Contains $result.Out "RESULT: NO VERDICT" "probe api: timeout verdict printed"
+
+$result = Invoke-ProbeApi -Status "401" -Body '{"error":{"message":"unauthorized"}}'
+Check-Rc 2 "probe api: 401 remains no verdict" $result
+
+$result = Invoke-ProbeApi -Status "500" -Body '{"error":"internal"}'
+Check-Rc 2 "probe api: 500 remains no verdict" $result
+
+$result = Invoke-ProbeApi -Body '{"choices":[{"message":{"content":"PONG"}}]}' -Mode "auto"
+Check-Rc 0 "probe api: auto selects the API for opencode models" $result
 
 # ----------------------------------------------------------- warp-rotate.ps1
 $rotate = Join-Path $Windows "warp-rotate.ps1"
@@ -447,11 +548,19 @@ exit 0
 
 $fakeNoStandalone = Join-Path $Tmp "fake-opencode-old.ps1"
 Write-Mock $fakeNoStandalone @'
+if ($args.Count -gt 0 -and [string]$args[0] -eq "run" -and $args.Count -gt 1 -and [string]$args[1] -eq "--help") {
+  Write-Output "opencode run --help (no such flag)"
+  exit 0
+}
 if ($args.Count -gt 0 -and [string]$args[0] -eq "--version") {
   Write-Output "opencode fake 0.1"
   exit 0
 }
-Write-Output "opencode run --help (no such flag)"
+if ($env:OPENCODE_CALL_LOG) {
+  $line = "proxy=" + $env:HTTPS_PROXY + "|no_proxy=" + $env:NO_PROXY + "|args=" + ($args -join " ")
+  [IO.File]::AppendAllText($env:OPENCODE_CALL_LOG, $line + "`n")
+}
+Write-Output "FAKE_OPENCODE_OK"
 exit 0
 '@
 
@@ -548,6 +657,40 @@ Check-Contains $result.Calls "standalone" "wrapper: exhausted recovery still use
 $result = Invoke-Wrapper -RotateRc 1 -Strict 1 -CurlRcs "0"
 Check-Rc 1 "wrapper: strict mode keeps exhausted recovery fatal" $result
 Check-NotContains $result.Calls "standalone" "wrapper: strict exhaustion does not start opencode"
+
+# `serve` is already a foreground server: WARP env, but no --standalone.
+$result = Invoke-Wrapper -Arguments @("serve", "--port", "4096")
+Check-Rc 0 "wrapper: serve starts opencode" $result
+Check-Contains $result.Calls "args=serve --port 4096" "wrapper: serve args are passed through"
+Check-NotContains $result.Calls "standalone" "wrapper: serve does not get --standalone"
+Check-Contains $result.Calls "proxy=http://127.0.0.1:40000" "wrapper: serve gets the WARP env"
+Check-Contains $result.Rotations "rotate" "wrapper: serve still runs the preflight"
+
+$result = Invoke-Wrapper -CurlRcs "1`n1`n1" -Arguments @("serve", "--port", "4096")
+Check-Rc 1 "wrapper: serve refuses a dead WARP proxy" $result
+Check-NotContains $result.Calls "args=serve" "wrapper: serve does not run on a broken proxy"
+
+$result = Invoke-Wrapper -OpenCode $fakeNoStandalone -Arguments @("serve", "--port", "4096")
+Check-Rc 0 "wrapper: serve does not require run --standalone" $result
+Check-Contains $result.Calls "args=serve --port 4096" "wrapper: serve still runs without the flag"
+
+# `--server` points at a server that owns its own egress: pure passthrough.
+$result = Invoke-Wrapper -Arguments @("run", "--server", "http://127.0.0.1:4096", "-m", "opencode/deepseek-v4.1-flash-free", "hi")
+Check-Rc 0 "wrapper: --server is a passthrough" $result
+Check-Contains $result.Calls "args=run --server http://127.0.0.1:4096 -m" "wrapper: --server args are passed through"
+Check-NotContains $result.Calls "standalone" "wrapper: --server does not get --standalone"
+Check-NotContains $result.Calls "proxy=http" "wrapper: --server does not get the proxy env"
+Check-Equal $result.Rotations.Trim() "" "wrapper: --server skips the preflight"
+
+$result = Invoke-Wrapper -Arguments @("api", "--server", "http://127.0.0.1:4096", "get", "/api/info")
+Check-Rc 0 "wrapper: api --server is a passthrough" $result
+Check-Contains $result.Calls "args=api --server http://127.0.0.1:4096 get /api/info" "wrapper: api args are passed through"
+Check-NotContains $result.Calls "standalone" "wrapper: api --server does not get --standalone"
+Check-Equal $result.Rotations.Trim() "" "wrapper: api --server skips the preflight"
+
+$result = Invoke-Wrapper -OpenCode $fakeNoStandalone -Arguments @("--server=remote", "api", "get", "/api/info")
+Check-Rc 0 "wrapper: --server=URL needs no --standalone" $result
+Check-Contains $result.Calls "args=--server=remote api" "wrapper: --server=URL is passed through"
 
 # Preflight policy: no log and no state means no probe at all.
 $result = Invoke-Wrapper -Extra @{ OPENCODE_WARP_FORCE_PROBE = "" }

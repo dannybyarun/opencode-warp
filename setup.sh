@@ -186,8 +186,9 @@ _run_help="$("$OC" run --help 2>&1 || true)"
 case "$_run_help" in
   *--standalone*) ok "'run --standalone' available" ;;
   *) die "This opencode version does not support 'run --standalone'.
-  The wrapper relies on it, and without it proxy env vars would be ignored
-  silently (the background service makes the actual inference calls).
+  The wrapper relies on it for run/TUI sessions, and without it proxy env vars
+  would be ignored silently (the background service makes the actual inference
+  calls).
   opencode version: $OPCODE_VERSION" ;;
 esac
 
@@ -224,8 +225,8 @@ else
   cat >> ~/.bashrc <<'EOF'
 
 # >>> opencode-warp shortcut >>>
-# `opencode --stand [args...]` routes opencode through WARP (127.0.0.1:40000)
-# and adds --standalone. Without --stand it behaves like normal opencode.
+# `opencode --stand [args...]` routes opencode through WARP (127.0.0.1:40000).
+# run/TUI sessions get --standalone; `serve` and `--server` do not.
 opencode() {
   if [ "${1:-}" = "--stand" ]; then
     shift
@@ -259,6 +260,11 @@ cat <<EOF
     opencode --stand run -m opencode/deepseek-v4.1-flash-free "hello"
     opencode-warp run -m <model> "hello"      # same thing, any shell
     opencode --stand                          # TUI through WARP
+    opencode --stand serve --port 4096        # API-only server through WARP
+    opencode --stand run --server <url> ...   # client for an existing server
+
+  `serve` prints a password; set OPENCODE_PASSWORD when connecting clients
+  with an explicit --server URL.
 
   If opencode's log shows a recent rate-limit error, --stand first checks the
   WARP ingress and rotates the anonymous registration when it is throttled:
@@ -276,6 +282,6 @@ cat <<EOF
 
     ${PLUGIN_DIR}/opencode-warp-rotate.ts
 
-  NOTE: the 'run' subcommand is still required - --stand only injects
-  --standalone, it does not invent the subcommand.
+  NOTE: the 'run' subcommand is still required for one-shot prompts; --stand
+  only adds --standalone (except for serve/--server, which must not get it).
 EOF

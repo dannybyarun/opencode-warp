@@ -547,8 +547,8 @@ function Get-OpenCodeWarpProfileBlock {
   return @'
 # >>> opencode-warp shortcut >>>
 # `opencode --stand [args...]` routes opencode through the local WARP proxy
-# (127.0.0.1:40000) and adds --standalone. Without --stand it behaves like
-# normal opencode.
+# (127.0.0.1:40000). run/TUI sessions get --standalone; `serve` and `--server`
+# do not. Without --stand it behaves like normal opencode.
 function global:opencode {
     if ($args.Count -gt 0 -and $args[0] -eq '--stand') {
         $rest = @()
