@@ -255,7 +255,10 @@ cat <<EOF
   Normal egress   : ${_direct_ip:-?}
   Through WARP    : ${_warp_ip:-?}
 
-  Start a new shell (or: source ~/.bashrc), then:
+  Start a new shell (or run: source ~/.bashrc) before using --stand.
+
+  "opencode --stand" is a shell function, not an opencode flag. If it is not
+  loaded yet, opencode itself reports "Unrecognized flag: --stand".
 
     opencode --stand run -m opencode/deepseek-v4.1-flash-free "hello"
     opencode-warp run -m <model> "hello"      # same thing, any shell
@@ -263,7 +266,7 @@ cat <<EOF
     opencode --stand serve --port 4096        # API-only server through WARP
     opencode --stand run --server <url> ...   # client for an existing server
 
-  `serve` prints a password; set OPENCODE_PASSWORD when connecting clients
+  serve prints a password; set OPENCODE_PASSWORD when connecting clients
   with an explicit --server URL.
 
   If opencode's log shows a recent rate-limit error, --stand first checks the

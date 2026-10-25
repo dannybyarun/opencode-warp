@@ -156,6 +156,10 @@ Use `opencode-warp` directly from scripts, cron, zsh, fish, or cmd.exe — it is
 plain executable. The `opencode --stand` form is a bash function on Linux/macOS
 and a PowerShell profile function on Windows.
 
+If `opencode --stand` reports `Unrecognized flag: --stand`, the shortcut is not
+loaded in that shell yet. Run `source ~/.bashrc` (Linux/macOS) or `. $PROFILE`
+(PowerShell), open a new terminal, or call `opencode-warp` directly.
+
 ---
 
 ## Windows layout

@@ -579,6 +579,10 @@ Write-Host @"
 
   Start a new PowerShell window (so the profile and PATH are loaded), then:
 
+  "opencode --stand" is a profile function, not an opencode flag. If it is
+  not loaded yet, opencode itself reports "Unrecognized flag: --stand".
+  In the current window, load it with:  . `$PROFILE
+
     opencode --stand run -m opencode/deepseek-v4.1-flash-free "hello"
     opencode-warp run -m <model> "hello"      # same thing, any shell
     opencode --stand                          # TUI through WARP
@@ -593,7 +597,7 @@ Write-Host @"
     opencode --stand serve --port 4096
     opencode --stand run --server <url> ...   # client for an existing server
 
-  `serve` prints a password; set `$env:OPENCODE_PASSWORD` when connecting
+  serve prints a password; set `$env:OPENCODE_PASSWORD` when connecting
   clients with an explicit --server URL.
 
   If opencode's log shows a recent rate-limit error, --stand first checks the
