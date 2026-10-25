@@ -83,8 +83,8 @@ handles a 429 that happens mid-session. See
 | RHEL / Rocky / Alma / CentOS / Fedora / Oracle Linux | ✅ official `.rpm` |
 | Windows 10/11 (x64 / arm64) | 🟡 native PowerShell port; installer and offline tests pass, real WARP/opencode-on-Windows not yet verified here |
 | Arch / openSUSE / Alpine | ❌ no official package — install WARP yourself, then `./setup.sh --skip-warp-package` |
-| macOS | ⚠️ partial; different install path, behaviour varies |
-| Containers (Docker, most sandboxes) | ❌ almost always rejected |
+| macOS | ⚠️ wrapper only; `setup.sh` is Linux-only — install WARP + opencode manually |
+| Containers (Docker, most sandboxes) | ❌ almost always rejected; needs `/dev/net/tun` and systemd |
 
 On Windows, the OpenCode project still recommends WSL for the smoothest
 experience and its native Windows build is less battle-tested. This repo does

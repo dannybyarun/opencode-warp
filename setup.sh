@@ -25,6 +25,26 @@ say()  { printf '\n==> %s\n' "$*"; }
 ok()   { printf '    ok: %s\n' "$*"; }
 die()  { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 
+# Fail before the root check so macOS/Windows users get the right instruction
+# instead of "re-run as root".
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  Linux) ;;
+  Darwin)
+    die "setup.sh is for Linux. On macOS:
+  - install the Cloudflare WARP client and enable its local proxy mode
+  - install opencode
+  - run ./opencode-warp directly (it is a plain bash script)
+  See README.md for the macOS caveats."
+    ;;
+  MINGW*|MSYS*|CYGWIN*)
+    die "setup.sh is for Linux. On Windows, use:
+      powershell -NoProfile -ExecutionPolicy Bypass -File .\\windows\\setup.ps1"
+    ;;
+  *)
+    die "unsupported platform: $(uname -s 2>/dev/null || echo unknown). setup.sh supports Linux only."
+    ;;
+esac
+
 [ "$(id -u)" -eq 0 ] || die "re-run as root (sudo ./setup.sh)"
 export DEBIAN_FRONTEND=noninteractive
 
@@ -72,9 +92,10 @@ fi
 
 [ -n "$FAMILY" ] || die "Unsupported distro ('${ID:-unknown}').
   Official packages exist only for Debian/Ubuntu (.deb) and RHEL-family (.rpm).
-  On Arch/openSUSE/Alpine/macOS/Windows, install Cloudflare WARP yourself,
-  ensure it is in proxy mode on 127.0.0.1:${PORT}, then run:
-      ./setup.sh --skip-warp-package"
+  On Arch/openSUSE/Alpine, install Cloudflare WARP yourself, ensure it is in
+  proxy mode on 127.0.0.1:${PORT}, then run:
+      ./setup.sh --skip-warp-package
+  macOS and Windows have separate install paths; see README.md."
 
 SKIP_PACKAGE=0
 [ "${1:-}" = "--skip-warp-package" ] && SKIP_PACKAGE=1
