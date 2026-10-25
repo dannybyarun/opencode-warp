@@ -103,16 +103,17 @@ rather than failing partway through an install. Pass
 ## opencode is installed automatically
 
 On Linux, if no opencode binary is found on `PATH` or in `~/.opencode/bin`,
-`setup.sh` fetches the **official installer** from `https://opencode.ai/install`
-and runs it.
+`setup.sh` fetches the **OpenCode 2 installer** from
+`https://opencode.ai/v2/install` and runs it. It does not use the legacy
+`https://opencode.ai/install` endpoint, which only installs OpenCode 1
+(`1.x`).
 
 It downloads to a temp file and **verifies the first line is a bash shebang
 before executing** — refusing to run anything that looks like an HTML error
 page. It does not blindly pipe `curl` into `bash`.
 
-Note: the npm package `opencode-ai` is **not** used. It currently ships
-`1.x` while the official installer delivers `2.x` — npm would install
-something stale.
+Note: the npm package `opencode-ai` is also OpenCode 1 (`1.x`). The OpenCode 2
+package is `@opencode/cli`, which is what the Windows setup uses.
 
 On Windows, `setup.ps1` first tries `npm install -g @opencode/cli@latest`
 (OpenCode 2). If npm is unavailable or the install fails, it downloads the
@@ -508,7 +509,7 @@ startup policy, and the `serve`/`--server` argument routing. The Windows suite
 also checks profile install/remove behaviour, the `.cmd` shims, and rejects
 PowerShell 7-only syntax.
 
-Expected totals: **88** Linux checks and **169** Windows checks.
+Expected totals: **90** Linux checks and **169** Windows checks.
 
 ---
 

@@ -18,7 +18,7 @@ set -euo pipefail
 
 PORT="${WARP_PROXY_PORT:-40000}"
 PROXY="http://127.0.0.1:${PORT}"
-OPENCODE_INSTALL_URL="https://opencode.ai/install"
+OPENCODE_INSTALL_URL="https://opencode.ai/v2/install"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 say()  { printf '\n==> %s\n' "$*"; }
@@ -159,6 +159,7 @@ find_opencode() {
 
 if OC="$(find_opencode)"; then
   ok "found at $OC"
+  FRESH_INSTALL=0
 else
   say "opencode not found - installing from the official installer"
   tmp="$(mktemp)"
@@ -172,10 +173,30 @@ else
   hash -r
   OC="$(find_opencode)" || die "opencode installer ran but no binary was found"
   ok "installed at $OC"
+  FRESH_INSTALL=1
 fi
 
 OPCODE_VERSION="$("$OC" --version 2>/dev/null | head -1 || echo unknown)"
 ok "version: $OPCODE_VERSION"
+
+# The V2 installer should always produce OpenCode 2. If it did not, fail
+# loudly: `serve`/`--server` and the v2 API route do not exist in OpenCode 1.
+# An existing v1 is left alone, but the user is told what will not work.
+_oc_version="${OPCODE_VERSION##* }"
+_oc_version="${_oc_version#v}"
+_oc_major="${_oc_version%%.*}"
+case "$_oc_major" in
+  ''|*[!0-9]*) _oc_major=0 ;;
+esac
+if [ "$_oc_major" -lt 2 ]; then
+  if [ "$FRESH_INSTALL" -eq 1 ]; then
+    die "the installer produced $OPCODE_VERSION, not OpenCode 2.
+  The serve/API modes need OpenCode 2. Check:
+      https://opencode.ai/v2/install"
+  fi
+  printf '    !  OpenCode 1 detected (%s); serve/API mode needs OpenCode 2.\n' "$OPCODE_VERSION"
+  printf '       upgrade with: %s upgrade --major\n' "$OC"
+fi
 
 # --------------------------------------------------- version resilience
 # The wrapper depends on `--standalone`. If a future opencode drops it the

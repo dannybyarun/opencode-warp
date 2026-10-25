@@ -446,6 +446,10 @@ FORCE_PROBE=0 LOG_PATH="$TMP/wrap-rate.log" run_wrapper 0 "0" 0 run -m anthropic
 check_rc 0 "wrapper: paid models still run"
 check_not_contains "$TMP/wrap.stderr" 'fake rotate' "wrapper: paid model skips free-tier rotation"
 
+# ------------------------------------------------------------ installer URLs
+check_contains "$ROOT/setup.sh" 'OPENCODE_INSTALL_URL="https://opencode\.ai/v2/install"' "setup: uses the OpenCode 2 installer"
+check_not_contains "$ROOT/setup.sh" 'OPENCODE_INSTALL_URL="https://opencode\.ai/install"' "setup: does not use the OpenCode 1 installer"
+
 # ------------------------------------------------------------------ summary
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
