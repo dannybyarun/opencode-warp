@@ -250,6 +250,11 @@ Write-Output "Upgrade to OpenCode Go -> /connect"
 exit 1
 '@
 
+$probeHttp429 = New-ProbeMock "http429" @'
+Write-Output "Error: request failed with HTTP status 429"
+exit 1
+'@
+
 $probeTransport = New-ProbeMock "transport" @'
 Write-Output "Error: Transport: ECONNRESET: The socket connection was closed unexpectedly."
 Start-Sleep -Seconds 30
@@ -294,6 +299,10 @@ Check-Contains $result.Out "RESULT: THROTTLED" "probe: throttled verdict printed
 $result = Invoke-Probe $probeFreeMessages
 Check-Rc 1 "probe: today's-free-messages notice is throttled" $result
 Check-Contains $result.Out "RESULT: THROTTLED" "probe: free-messages verdict printed"
+
+$result = Invoke-Probe $probeHttp429
+Check-Rc 1 "probe: a bare HTTP 429 is throttled" $result
+Check-Contains $result.Out "RESULT: THROTTLED" "probe: bare-429 verdict printed"
 
 $started = Get-Date
 $result = Invoke-Probe $probeTransport 20
@@ -567,6 +576,10 @@ exit 0
 $fakeRotate = Join-Path $Tmp "fake-rotate.ps1"
 Write-Mock $fakeRotate @'
 if ($env:ROTATE_LOG) { [IO.File]::AppendAllText($env:ROTATE_LOG, "rotate`n") }
+if ($env:ROTATE_ENV_LOG) {
+  $line = "PROBE_RUN=$($env:PROBE_RUN)`nPROBE_MODEL=$($env:PROBE_MODEL)`n"
+  [IO.File]::WriteAllText($env:ROTATE_ENV_LOG, $line)
+}
 if ($env:FAKE_ROTATE_OUTPUT) { Write-Output $env:FAKE_ROTATE_OUTPUT }
 $rc = 0
 if ($env:FAKE_ROTATE_RC) { $rc = [int]$env:FAKE_ROTATE_RC }
@@ -587,8 +600,10 @@ function Invoke-Wrapper {
   New-Item -ItemType Directory -Force -Path $caseDir | Out-Null
   $callLog = Join-Path $caseDir "opencode.log"
   $rotateLog = Join-Path $caseDir "rotate.log"
+  $rotateEnvLog = Join-Path $caseDir "rotate-env.log"
   [IO.File]::WriteAllText($callLog, "")
   [IO.File]::WriteAllText($rotateLog, "")
+  [IO.File]::WriteAllText($rotateEnvLog, "")
 
   $environment = @{
     OPENCODE_WARP_OPENCODE    = $OpenCode
@@ -601,6 +616,9 @@ function Invoke-Wrapper {
     OPENCODE_WARP_ROTATE_STRICT = $Strict
     OPENCODE_CALL_LOG         = $callLog
     ROTATE_LOG                = $rotateLog
+    ROTATE_ENV_LOG            = $rotateEnvLog
+    PROBE_RUN                 = ""
+    PROBE_MODEL               = ""
     FAKE_ROTATE_RC            = [string]$RotateRc
     CURL_SEQ                  = (Join-Path $caseDir "curl-seq")
     CURL_RCS                  = (Join-Path $caseDir "curl-rcs")
@@ -621,6 +639,7 @@ function Invoke-Wrapper {
   $result = Invoke-Child -Script $wrapper -Arguments $Arguments -Environment $environment
   $result | Add-Member -NotePropertyName Calls -NotePropertyValue (Read-Text $callLog)
   $result | Add-Member -NotePropertyName Rotations -NotePropertyValue (Read-Text $rotateLog)
+  $result | Add-Member -NotePropertyName RotateEnv -NotePropertyValue (Read-Text $rotateEnvLog)
   $result | Add-Member -NotePropertyName CaseDir -NotePropertyValue $caseDir
   return $result
 }
@@ -633,6 +652,13 @@ Check-Contains $result.Calls "proxy=http://127.0.0.1:40000" "wrapper: HTTPS_PROX
 Check-Contains $result.Calls "no_proxy=127.0.0.1,localhost" "wrapper: NO_PROXY is injected"
 Check-NotContains $result.Calls "args=--stand " "wrapper: the --stand marker is stripped"
 Check-Contains $result.Rotations "rotate" "wrapper: preflight consulted the rotator"
+Check-NotContains $result.RotateEnv "PROBE_RUN=." "wrapper: opencode models let the probe use the API"
+Check-Contains $result.RotateEnv "PROBE_MODEL=opencode/deepseek-v4.1-flash-free" "wrapper: the free model is forwarded to the probe"
+
+$result = Invoke-Wrapper -Arguments @("run", "-m", "openrouter/some-free-model", "hi")
+Check-Rc 0 "wrapper: third-party free models still run" $result
+Check-Contains $result.RotateEnv "PROBE_RUN=.*opencode-warp.ps1" "wrapper: third-party models force the CLI probe"
+Check-Contains $result.RotateEnv "PROBE_MODEL=openrouter/some-free-model" "wrapper: the third-party model is forwarded"
 
 $result = Invoke-Wrapper -RotateRc 2 -CurlRcs "0`n0"
 Check-Rc 0 "wrapper: no verdict starts opencode when proxy is reachable" $result
@@ -791,6 +817,13 @@ Check-Contains $profileText "Set-Variable editor vim" "profile: unrelated conten
 Check-Equal (ConvertTo-QuotedArgument "two words") '"two words"' "arguments: spaces are quoted"
 Check-Equal (ConvertTo-QuotedArgument "plain") "plain" "arguments: plain words stay unquoted"
 
+Check-Equal (Get-OpenCodeMajorVersion "opencode v2.1.4") 2 "setup policy: 'opencode v2.1.4' is major 2"
+Check-Equal (Get-OpenCodeMajorVersion "2.1.4") 2 "setup policy: a bare version is parsed"
+Check-Equal (Get-OpenCodeMajorVersion "opencode v1.18.3") 1 "setup policy: OpenCode 1 is detected"
+Check-Equal (Get-OpenCodeMajorVersion "v10.0.1") 10 "setup policy: multi-digit majors are parsed"
+Check-Equal (Get-OpenCodeMajorVersion "unknown") 0 "setup policy: unknown versions count as 0"
+Check-Equal (Get-OpenCodeMajorVersion "") 0 "setup policy: empty versions count as 0"
+
 # OpenCode's own OPENCODE_CONFIG_DIR must win over the platform default, and
 # the repo-specific override must win over both.
 $env:XDG_CONFIG_HOME = Join-Path $Tmp "xdg"
@@ -880,6 +913,12 @@ $result = Invoke-Child -Script $setup -Arguments @("-ValidateOnly")
 Check-Rc 0 "setup: -ValidateOnly passes" $result
 Check-Contains $result.Out "validation ok" "setup: validation reports success"
 Check-Contains $result.Out "ok   - uninstall.ps1" "setup: uninstaller is installed with the helpers"
+
+$setupText = Read-Text $setup
+Check-Contains $setupText "Get-OpenCodeMajorVersion" "setup policy: the parsed major version is used"
+Check-Contains $setupText "FreshInstall" "setup policy: fresh installs are tracked"
+Check-Contains $setupText "not OpenCode 2" "setup policy: a fresh OpenCode 1 install fails"
+Check-Contains $setupText "upgrade --major" "setup policy: an existing OpenCode 1 gets upgrade advice"
 
 $uninstall = Join-Path $Windows "uninstall.ps1"
 $uninstallText = Read-Text $uninstall

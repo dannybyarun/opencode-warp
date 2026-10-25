@@ -185,6 +185,20 @@ function Get-OpenCodeVersion {
   return "unknown"
 }
 
+function Get-OpenCodeMajorVersion {
+  param([string]$Version)
+  if (-not $Version) { return 0 }
+  # "opencode v2.1.4" and "2.1.4" both mean 2. Anything unparseable counts as
+  # 0, so an unknown version is treated like OpenCode 1 instead of passing.
+  $token = ($Version.Trim() -split '\s+')[-1]
+  $token = $token -replace '^[vV]', ''
+  if ($token -match '^(\d+)') {
+    $major = 0
+    if ([int]::TryParse($Matches[1], [ref]$major)) { return $major }
+  }
+  return 0
+}
+
 function Test-OpenCodeStandalone {
   param([string]$OpenCodePath)
   if (-not $OpenCodePath) { return $false }

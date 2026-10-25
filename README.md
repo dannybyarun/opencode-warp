@@ -121,6 +121,11 @@ official standalone `opencode-windows-x64.zip` / `opencode-windows-arm64.zip`
 and installs `opencode.exe` into `%USERPROFILE%\.opencode\bin`. It never uses
 the stale `opencode-ai` package.
 
+Both installers verify the result is **OpenCode 2**. A fresh install that is
+still 1.x is an error, because `serve`/`--server` and the v2 API do not exist
+there. An existing 1.x install is left alone, but setup warns and suggests
+`opencode upgrade --major`.
+
 ## Survives opencode upgrades
 
 The wrapper depends on `run --standalone` for `run` and TUI sessions. If a
@@ -509,7 +514,7 @@ startup policy, and the `serve`/`--server` argument routing. The Windows suite
 also checks profile install/remove behaviour, the `.cmd` shims, and rejects
 PowerShell 7-only syntax.
 
-Expected totals: **90** Linux checks and **169** Windows checks.
+Expected totals: **99** Linux checks and **186** Windows checks.
 
 ---
 

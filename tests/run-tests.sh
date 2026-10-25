@@ -82,6 +82,10 @@ echo "You'"'"'ve used today'"'"'s free messages. They reset at 12:00 AM."
 echo "Upgrade to OpenCode Go"
 exit 1'
 
+say_probe http429 '#!/usr/bin/env bash
+echo "Error: request failed with HTTP status 429"
+exit 1'
+
 say_probe transport '#!/usr/bin/env bash
 trap "exit 143" TERM
 echo "Error: Transport: ECONNRESET: The socket connection was closed unexpectedly."
@@ -106,6 +110,10 @@ check_contains "$TMP/probe.stdout" 'RESULT: THROTTLED' "probe cli: throttled ver
 run_probe free_messages
 check_rc 1 "probe cli: today's-free-messages notice is throttled"
 check_contains "$TMP/probe.stdout" 'RESULT: THROTTLED' "probe cli: free-messages verdict printed"
+
+run_probe http429
+check_rc 1 "probe cli: a bare HTTP 429 is throttled"
+check_contains "$TMP/probe.stdout" 'RESULT: THROTTLED' "probe cli: bare-429 verdict printed"
 
 "$ROOT/probe.sh" --help >"$TMP/probe-help" 2>&1
 RC=$?
@@ -203,6 +211,10 @@ check_contains "$TMP/probe.stdout" 'RESULT: THROTTLED' "probe api: throttled ver
 check_contains "$TMP/probe.stdout" 'HTTP 429' "probe api: HTTP status is reported"
 check_contains "$TMP/probe.stdout" 'unblocks' "probe api: retry-after is decoded"
 check_contains "$TMP/probe.stdout" 'test-ray' "probe api: cf-ray is reported"
+check_contains "$TMP/probe.stdout" 'FreeUsageLimitError: Free usage limit reached' "probe api: the limit wording is reported"
+
+run_probe_api 403 0 '{"error":{"message":"You have used today'"'"'s free messages."}}'
+check_rc 1 "probe api: free-messages wording is throttled"
 
 run_probe_api 000 56 ''
 check_rc 3 "probe api: curl reset is a transport failure"
@@ -315,6 +327,9 @@ chmod +x "$TMP/wrap/opencode-warp"
 # The wrapper picks warp-rotate.sh from its own directory first.
 write_fake "$TMP/wrap/warp-rotate.sh" '#!/usr/bin/env bash
 echo "fake rotate rc=$FAKE_ROTATE_RC" >&2
+if [ -n "${ROTATE_ENV_LOG:-}" ]; then
+  printf "PROBE_RUN=%s\nPROBE_MODEL=%s\n" "${PROBE_RUN:-}" "${PROBE_MODEL:-}" >"$ROTATE_ENV_LOG"
+fi
 exit "$FAKE_ROTATE_RC"'
 
 write_fake "$TMP/fakeopencode/opencode" '#!/usr/bin/env bash
@@ -348,16 +363,19 @@ run_wrapper() {
   printf '%s\n' "$curl_rcs" >"$TMP/curl-rcs"
   : >"$TMP/curl-seq"
   : >"$TMP/opencode.log"
+  : >"$TMP/rotate-env.log"
   PATH="$TMP/fakeopencode:$TMP/fakecurl:$PATH" \
   OPCODE_REAL="$TMP/fakeopencode/opencode" \
   XDG_CACHE_HOME="$TMP/wcache" \
   HTTPS_PROXY="" HTTP_PROXY="" https_proxy="" http_proxy="" \
   NO_PROXY="" no_proxy="" \
+  PROBE_RUN="" PROBE_MODEL="" \
   OPENCODE_WARP_FORCE_PROBE="${FORCE_PROBE:-1}" \
   OPENCODE_WARP_LOG="${LOG_PATH:-}" \
   OPENCODE_WARP_ROTATE_STRICT="$strict" \
   FAKE_ROTATE_RC="$rotate_rc" \
   FAKE_NO_STANDALONE="${FAKE_NO_STANDALONE:-0}" \
+  ROTATE_ENV_LOG="$TMP/rotate-env.log" \
   CURL_SEQ="$TMP/curl-seq" \
   CURL_RCS="$TMP/curl-rcs" \
   OPENCODE_CALL_LOG="$TMP/opencode.log" \
@@ -370,6 +388,13 @@ check_rc 0 "wrapper: healthy rotation starts opencode"
 check_contains "$TMP/opencode.log" 'ARGS=.*standalone' "wrapper: --standalone still injected"
 check_contains "$TMP/opencode.log" 'HTTPS_PROXY=http://127.0.0.1:40000' "wrapper: run gets WARP env"
 check_contains "$TMP/wrap.stdout" 'FAKE_OPENCODE_OK' "wrapper: opencode actually ran"
+check_contains "$TMP/rotate-env.log" '^PROBE_RUN=$' "wrapper: opencode models let the probe use the API"
+check_contains "$TMP/rotate-env.log" '^PROBE_MODEL=opencode/deepseek-v4.1-flash-free$' "wrapper: the free model is forwarded to the probe"
+
+run_wrapper 0 "0" 0 run -m openrouter/some-free-model "hi"
+check_rc 0 "wrapper: third-party free models still run"
+check_contains "$TMP/rotate-env.log" '^PROBE_RUN=.*/opencode-warp$' "wrapper: third-party models force the CLI probe"
+check_contains "$TMP/rotate-env.log" '^PROBE_MODEL=openrouter/some-free-model$' "wrapper: the third-party model is forwarded"
 
 run_wrapper 2 "0
 0" 0 run -m opencode/deepseek-v4.1-flash-free "hi"

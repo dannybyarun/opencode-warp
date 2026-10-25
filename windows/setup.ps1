@@ -438,6 +438,7 @@ function Get-OpenCodeDownloadUrl {
 }
 
 function Install-OpenCode {
+  $script:OpenCodeFreshInstall = $false
   $opencode = Find-OpenCode
   if ($opencode) {
     Ok "opencode already installed: $opencode"
@@ -464,7 +465,10 @@ function Install-OpenCode {
   }
 
   $opencode = Find-OpenCode
-  if ($opencode) { return $opencode }
+  if ($opencode) {
+    $script:OpenCodeFreshInstall = $true
+    return $opencode
+  }
 
   $zip = Join-Path ([IO.Path]::GetTempPath()) ("opencode-" + [Guid]::NewGuid().ToString("N") + ".zip")
   $extract = Join-Path ([IO.Path]::GetTempPath()) ("opencode-extract-" + [Guid]::NewGuid().ToString("N"))
@@ -519,6 +523,7 @@ function Install-OpenCode {
     Fail "opencode was installed to $target but was not found afterwards."
   }
   Ok "installed at $opencode"
+  $script:OpenCodeFreshInstall = $true
   return $opencode
 }
 
@@ -544,6 +549,20 @@ Say "Checking opencode"
 $opencode = Install-OpenCode
 $version = Get-OpenCodeVersion $opencode
 Ok "version: $version"
+
+# The V2 installer should always produce OpenCode 2. If it did not, fail
+# loudly: `serve`/`--server` and the v2 API route do not exist in OpenCode 1.
+# An existing v1 is left alone, but the user is told what will not work.
+$major = Get-OpenCodeMajorVersion $version
+if ($major -lt 2) {
+  if ($script:OpenCodeFreshInstall) {
+    Fail "the installer produced $version, not OpenCode 2.
+  The serve/API modes need OpenCode 2. Check:
+      https://opencode.ai/v2/install"
+  }
+  Warn "OpenCode 1 detected ($version); serve/API mode needs OpenCode 2."
+  Write-Host "       upgrade with: $opencode upgrade --major"
+}
 
 Say "Verifying the wrapper's required flags still exist"
 if (-not (Test-OpenCodeStandalone $opencode)) {

@@ -92,6 +92,10 @@ if (-not $log) { $log = Join-Path (Get-OpenCodeDataDir) "ratelimit-retry.jsonl" 
 
 $transportPattern = "ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|socket connection was closed|fetch failed|connection reset by peer|recv failure|send failure|connection refused|could not connect"
 $throttlePattern = "rate limit exceeded|free usage limit reached|freeusagelimiterror|free messages|too many requests"
+# The API mode learns the status from curl, so a bare "429" in the body is not
+# needed there. CLI output has no status field, and OpenCode can print just
+# "HTTP 429"; match that too, like probe.sh.
+$cliThrottlePattern = $throttlePattern + "|429"
 
 function Write-Egress {
   Write-Output "--- egress (WARP) ---"
@@ -368,10 +372,10 @@ function Invoke-CliProbe {
   #    "Free usage limit reached" is the daily-free-tier text; the TUI may
   #    instead say "You've used today's free messages" - both mean the shared
   #    bucket is empty for you now.
-  if ($output -imatch $throttlePattern) {
+  if ($output -imatch $cliThrottlePattern) {
     Write-Output "RESULT: THROTTLED (exit $rc)"
     @($output -split "`r?`n" | Where-Object {
-        $_ -imatch $throttlePattern
+        $_ -imatch $cliThrottlePattern
       } | Select-Object -First 2) | ForEach-Object { Write-Output "  opencode said: $_" }
 
     Write-LogHint

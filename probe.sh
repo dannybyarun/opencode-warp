@@ -122,7 +122,7 @@ PY
 }
 
 probe_api() {
-  local api_model="$MODEL" payload status rc retry cfray deadline
+  local api_model="$MODEL" payload status rc retry cfray deadline api_type api_msg
   case "$api_model" in
     opencode/*) api_model="${api_model#opencode/}" ;;
   esac
@@ -159,8 +159,19 @@ probe_api() {
   if [ "$status" = "429" ] \
      || grep -qiE 'free usage limit reached|freeusagelimiterror|free messages|rate limit exceeded|too many requests' "$OUT" 2>/dev/null; then
     echo "RESULT: THROTTLED (HTTP $status)"
-    grep -oiE '"(message|type)"[[:space:]]*:[[:space:]]*"[^"]{0,200}"' "$OUT" 2>/dev/null \
-      | head -2 | sed 's/^/  api said: /'
+    # The real body is {"type":"error","error":{"type":...,"message":...}}.
+    # Prefer the nested limit wording over the outer generic "error" type.
+    api_type="$(grep -oiE '"type"[[:space:]]*:[[:space:]]*"[^"]{0,120}"' "$OUT" 2>/dev/null \
+      | tail -1 | sed -E 's/^"[^"]+"[[:space:]]*:[[:space:]]*"//; s/"$//')"
+    api_msg="$(grep -oiE '"message"[[:space:]]*:[[:space:]]*"[^"]{0,300}"' "$OUT" 2>/dev/null \
+      | tail -1 | sed -E 's/^"[^"]+"[[:space:]]*:[[:space:]]*"//; s/"$//')"
+    if [ -n "$api_type" ] && [ -n "$api_msg" ]; then
+      echo "  api said: ${api_type}: ${api_msg}"
+    elif [ -n "$api_msg" ]; then
+      echo "  api said: ${api_msg}"
+    elif [ -n "$api_type" ]; then
+      echo "  api said: ${api_type}"
+    fi
     retry="$(grep -i '^retry-after:' "$HDR" 2>/dev/null | tail -1 | tr -d '\r' | awk '{print $2}')"
     cfray="$(grep -i '^cf-ray:' "$HDR" 2>/dev/null | tail -1 | tr -d '\r' | awk '{print $2}')"
     case "$retry" in
@@ -227,9 +238,9 @@ probe_cli() {
   #    ("Rate limit exceeded" is the 429 text; "Free usage limit reached" is the
   #    daily-free-tier text; the TUI may instead say "You've used today's free
   #    messages" - all mean the shared bucket is empty for you now)
-  if grep -qiE 'rate limit exceeded|free usage limit reached|free messages|too many requests|429' "$OUT" 2>/dev/null; then
+  if grep -qiE 'rate limit exceeded|free usage limit reached|freeusagelimiterror|free messages|too many requests|429' "$OUT" 2>/dev/null; then
     echo "RESULT: THROTTLED (exit $rc)"
-    grep -iE 'rate limit exceeded|free usage limit reached|free messages|too many requests|429' "$OUT" | head -2 | sed 's/^/  opencode said: /'
+    grep -iE 'rate limit exceeded|free usage limit reached|freeusagelimiterror|free messages|too many requests|429' "$OUT" | head -2 | sed 's/^/  opencode said: /'
     print_log_hint
     exit 1
   fi
