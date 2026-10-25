@@ -9,7 +9,8 @@
  * the provider's multi-hour retry-after.
  *
  * It only activates when all of these are true:
- *   - opencode is talking through 127.0.0.1:${WARP_PROXY_PORT} (i.e. --stand)
+ *   - opencode is talking through 127.0.0.1:${WARP_PROXY_PORT}
+ *     (i.e. --stand, or a `serve` started through the wrapper)
  *   - OPENCODE_WARP_NO_ROTATE is not set (probe/preflight recursion guard)
  *   - the failure is a rate-limit/quota failure
  *   - the model id contains "free" (unless freeOnly is disabled)

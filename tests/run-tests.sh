@@ -428,6 +428,7 @@ check_rc 0 "wrapper: serve starts opencode"
 check_contains "$TMP/opencode.log" 'ARGS=serve --port 4096' "wrapper: serve args are passed through"
 check_not_contains "$TMP/opencode.log" 'standalone' "wrapper: serve does not get --standalone"
 check_contains "$TMP/opencode.log" 'HTTPS_PROXY=http://127.0.0.1:40000' "wrapper: serve gets the WARP env"
+check_contains "$TMP/wrap.stderr" 'fake rotate rc=0' "wrapper: serve still runs the preflight"
 
 run_wrapper 0 "1
 1" 0 serve --port 4096

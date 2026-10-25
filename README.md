@@ -219,7 +219,10 @@ WARP.
 
 `opencode serve` is the headless V2 API and web server. The server process owns
 the inference egress, so it gets the WARP proxy env and **not** `--standalone`
-(opencode rejects that flag on `serve`):
+(opencode rejects that flag on `serve`). It also gets both recovery layers:
+the launch-time preflight runs before the server starts, and the live 429
+plugin is active inside the server process, so a throttle mid-session rotates
+WARP and retries just like `--stand`:
 
 ```bash
 opencode --stand serve --hostname 127.0.0.1 --port 4096
@@ -514,7 +517,7 @@ startup policy, and the `serve`/`--server` argument routing. The Windows suite
 also checks profile install/remove behaviour, the `.cmd` shims, and rejects
 PowerShell 7-only syntax.
 
-Expected totals: **99** Linux checks and **186** Windows checks.
+Expected totals: **100** Linux checks and **186** Windows checks.
 
 ---
 
