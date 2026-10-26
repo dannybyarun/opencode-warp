@@ -284,7 +284,9 @@ The wrapper handles both. If you drive opencode another way, you must too.
    registration that leaves the same IP is treated as a failed rotation,
    because the probe would just hit the same bucket. It retries up to
    `WARP_ROTATE_ATTEMPTS` times (default 2), then warns and lets opencode
-   start anyway.
+   start anyway. Every probe also prints the observed `ip=`, `loc=`, and
+   `warp=` egress — including failed attempts — so you can verify which
+   ingress the model request actually used.
 4. The probe itself never rotates. It sets `OPENCODE_WARP_NO_ROTATE=1`, so the
    wrapper it launches cannot start a recursive preflight.
 

@@ -121,6 +121,19 @@ function Invoke-Probe {
   return $result.ExitCode
 }
 
+# Show the egress that probe.ps1 recorded. This runs for every probe, not just
+# a successful one, so a still-throttled rotation can be checked against the
+# previous IP/location instead of being a black box.
+function Write-Egress {
+  param([string]$Label)
+  $lines = @((Read-TextFile $probeOut) -split "`r?`n" | Where-Object { $_ -match "^(ip|loc|warp)=" })
+  if ($lines.Count -eq 0) { return }
+  [Console]::Error.WriteLine("opencode-warp: $Label")
+  foreach ($line in $lines) {
+    [Console]::Error.WriteLine("  " + $line)
+  }
+}
+
 function Invoke-WarpCli {
   param([string[]]$Arguments)
   $warpCli = Find-WarpCli
@@ -242,6 +255,7 @@ try {
   if (-not $force) {
     Write-Say "checking the WARP ingress"
     $rc = Invoke-Probe
+    Write-Egress "current ingress"
 
     switch ($rc) {
       0 {
@@ -284,6 +298,7 @@ try {
 
     Write-Say "probing the new ingress"
     $rc = Invoke-Probe
+    Write-Egress "new ingress (attempt $attempt/$attempts)"
     switch ($rc) {
       0 { }
       1 { Write-Say "the new ingress is still throttled" }
@@ -302,8 +317,6 @@ try {
 
     if ($rc -eq 0) {
       Write-Say "recovered: the new ingress passes"
-      @((Read-TextFile $probeOut) -split "`r?`n" | Where-Object { $_ -match "^(ip|loc|warp)=" }) |
-        ForEach-Object { [Console]::Error.WriteLine("  " + $_) }
       Write-StateEpoch "last-ok" (Get-EpochSeconds)
       Remove-StateFile "last-throttled"
       $rotatedOk = $true

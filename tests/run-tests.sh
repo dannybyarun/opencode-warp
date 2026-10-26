@@ -329,6 +329,19 @@ check_rc 0 "rotate: throttled then healthy recovers"
 check_contains "$TMP/warp-cli.log" 'registration new' "rotate: throttle creates a new registration"
 check_contains "$TMP/rotate.stderr" 'recovered: the new ingress passes' "rotate: recovery is reported"
 check_contains "$TMP/rotate.stderr" 'new egress IP: 203.0.113.1' "rotate: new egress IP is reported"
+check_contains "$TMP/rotate.stderr" 'new ingress \(attempt 1/2\)' "rotate: recovered egress is labelled"
+check_contains "$TMP/rotate.stderr" 'ip=203\.0\.113\.2' "rotate: recovered egress IP is shown"
+
+run_rotate "1
+1
+1"
+check_rc 1 "rotate: exhausted throttles stays throttled"
+check_contains "$TMP/rotate.stderr" 'current ingress' "rotate: initial egress is shown"
+check_contains "$TMP/rotate.stderr" 'ip=203\.0\.113\.1' "rotate: initial egress IP is shown"
+check_contains "$TMP/rotate.stderr" 'new ingress \(attempt 1/2\)' "rotate: first rotated ingress is labelled"
+check_contains "$TMP/rotate.stderr" 'ip=203\.0\.113\.2' "rotate: first rotated ingress IP is shown"
+check_contains "$TMP/rotate.stderr" 'new ingress \(attempt 2/2\)' "rotate: second rotated ingress is labelled"
+check_contains "$TMP/rotate.stderr" 'ip=203\.0\.113\.3' "rotate: second rotated ingress IP is shown"
 
 run_rotate "3
 0"

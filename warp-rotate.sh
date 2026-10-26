@@ -71,6 +71,22 @@ done
 say()  { printf 'opencode-warp: %s\n' "$*" >&2; }
 warn() { printf 'opencode-warp: warning: %s\n' "$*" >&2; }
 
+# Show the egress that probe.sh recorded in its capture file. This runs for
+# every probe, not just a successful one, so a still-throttled rotation can be
+# checked against the previous IP/location instead of being a black box.
+show_egress() {
+  local label="$1" file="$2" ip loc warp
+  ip="$(grep -m1 '^ip=' "$file" 2>/dev/null || true)"
+  loc="$(grep -m1 '^loc=' "$file" 2>/dev/null || true)"
+  warp="$(grep -m1 '^warp=' "$file" 2>/dev/null || true)"
+  [ -n "$ip$loc$warp" ] || return 0
+  printf 'opencode-warp: %s\n' "$label" >&2
+  [ -n "$ip" ] && printf '  %s\n' "$ip" >&2
+  [ -n "$loc" ] && printf '  %s\n' "$loc" >&2
+  [ -n "$warp" ] && printf '  %s\n' "$warp" >&2
+  return 0
+}
+
 # An invalid attempt count must not turn into "no rotation at all".
 case "$ATTEMPTS" in
   ''|*[!0-9]*|0) ATTEMPTS=1 ;;
@@ -242,6 +258,7 @@ if [ "$FORCE" -eq 0 ]; then
   say "checking the WARP ingress"
   probe_ingress "$probe_out"
   rc=$?
+  show_egress "current ingress" "$probe_out"
 
   case "$rc" in
     0)
@@ -281,6 +298,7 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
   say "probing the new ingress"
   probe_ingress "$probe_out"
   rc=$?
+  show_egress "new ingress (attempt ${attempt}/${ATTEMPTS})" "$probe_out"
   case "$rc" in
     0) : ;;
     1) say "the new ingress is still throttled"; probe_failures=$((probe_failures + 1)) ;;
@@ -294,7 +312,6 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
   esac
   if [ "$rc" -eq 0 ]; then
     say "recovered: the new ingress passes"
-    grep -E '^(ip|loc|warp)=' "$probe_out" 2>/dev/null | sed 's/^/  /' >&2 || true
     state_write last-ok
     rm -f "$STATE_DIR/last-throttled" 2>/dev/null || true
     rotated_ok=1
