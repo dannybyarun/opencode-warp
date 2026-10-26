@@ -239,12 +239,28 @@ mkdir -p "$TMP/fakebin" "$TMP/cache"
 write_fake "$TMP/fakebin/warp-cli" '#!/usr/bin/env bash
 printf "%s\n" "$*" >>"$WARPTEST_LOG"
 case "$*" in
+  *"registration new"*)
+    # A successful rotation must move the egress IP; tests can pin it with
+    # WARPTEST_IP_STATIC=1 to exercise the no-op guard.
+    if [ "${WARPTEST_IP_STATIC:-0}" != "1" ]; then
+      n=$(cat "$WARPTEST_IP_SEQ" 2>/dev/null || echo 0)
+      n=$((n + 1))
+      printf "%s\n" "$n" >"$WARPTEST_IP_SEQ"
+      printf "203.0.113.%s\n" "$n" >"$WARPTEST_EGRESS_FILE"
+    fi
+    ;;
+esac
+case "$*" in
   *"status"*)   echo "Status update: Connected"; exit 0 ;;
   *"settings"*) echo "Mode: proxy"; exit 0 ;;
   *) exit 0 ;;
 esac'
 
 write_fake "$TMP/fakebin/curl" '#!/usr/bin/env bash
+if [ -n "${WARPTEST_EGRESS_FILE:-}" ] && [ -f "$WARPTEST_EGRESS_FILE" ]; then
+  printf "ip=%s\n" "$(cat "$WARPTEST_EGRESS_FILE")"
+  echo "warp=on"
+fi
 exit 0'
 
 # The fake probe reads its verdicts from $PROBE_RCS, one exit code per line.
@@ -267,18 +283,39 @@ esac
 exit "$rc"'
 
 run_rotate() {
-  local rcs=$1 attempts=${2:-2}
+  local rcs=$1 attempts=${2:-2} static=${3:-0}
   printf '%s\n' "$rcs" >"$TMP/probe-rcs"
   : >"$TMP/probe-seq"
   : >"$TMP/warp-cli.log"
+  printf '203.0.113.0\n' >"$TMP/egress-ip"
+  : >"$TMP/egress-seq"
   PATH="$TMP/fakebin:$PATH" \
   XDG_CACHE_HOME="$TMP/cache" \
   OPENCODE_WARP_PROBE="$TMP/fake-probe" \
   WARP_ROTATE_ATTEMPTS="$attempts" \
   WARPTEST_LOG="$TMP/warp-cli.log" \
+  WARPTEST_EGRESS_FILE="$TMP/egress-ip" \
+  WARPTEST_IP_SEQ="$TMP/egress-seq" \
+  WARPTEST_IP_STATIC="$static" \
   PROBE_SEQ="$TMP/probe-seq" \
   PROBE_RCS="$TMP/probe-rcs" \
     "$ROOT/warp-rotate.sh" >"$TMP/rotate.stdout" 2>"$TMP/rotate.stderr"
+  RC=$?
+}
+
+run_rotate_only() {
+  local attempts=${1:-2} static=${2:-0}
+  : >"$TMP/warp-cli.log"
+  printf '203.0.113.0\n' >"$TMP/egress-ip"
+  : >"$TMP/egress-seq"
+  PATH="$TMP/fakebin:$PATH" \
+  XDG_CACHE_HOME="$TMP/cache" \
+  WARP_ROTATE_ATTEMPTS="$attempts" \
+  WARPTEST_LOG="$TMP/warp-cli.log" \
+  WARPTEST_EGRESS_FILE="$TMP/egress-ip" \
+  WARPTEST_IP_SEQ="$TMP/egress-seq" \
+  WARPTEST_IP_STATIC="$static" \
+    "$ROOT/warp-rotate.sh" --rotate-only >"$TMP/rotate.stdout" 2>"$TMP/rotate.stderr"
   RC=$?
 }
 
@@ -291,6 +328,7 @@ run_rotate "1
 check_rc 0 "rotate: throttled then healthy recovers"
 check_contains "$TMP/warp-cli.log" 'registration new' "rotate: throttle creates a new registration"
 check_contains "$TMP/rotate.stderr" 'recovered: the new ingress passes' "rotate: recovery is reported"
+check_contains "$TMP/rotate.stderr" 'new egress IP: 203.0.113.1' "rotate: new egress IP is reported"
 
 run_rotate "3
 0"
@@ -304,6 +342,23 @@ check_rc 1 "rotate: exhausted transport failures are not fatal"
 check_contains "$TMP/rotate.stderr" 'still not passing after 2 rotation attempt' "rotate: neutral exhaustion message"
 count=$(grep -c 'registration new' "$TMP/warp-cli.log" 2>/dev/null || true)
 if [ "$count" -eq 2 ]; then ok "rotate: attempts are bounded"; else bad "rotate: expected 2 rotations, got $count"; fi
+
+run_rotate "1
+1" 2 1
+check_rc 2 "rotate: unchanged egress IP is a hard failure"
+check_contains "$TMP/rotate.stderr" 'did not change the WARP egress IP' "rotate: unchanged egress IP is explained"
+check_contains "$TMP/rotate.stderr" 'still 203.0.113.0' "rotate: unchanged egress IP is named"
+check_contains "$TMP/rotate.stderr" 'could not rotate the WARP egress after 2 attempt' "rotate: rotation failure is summarized"
+count=$(grep -c 'registration new' "$TMP/warp-cli.log" 2>/dev/null || true)
+if [ "$count" -eq 2 ]; then ok "rotate: unchanged-IP attempts are bounded"; else bad "rotate: expected 2 unchanged-IP attempts, got $count"; fi
+
+run_rotate_only 2 0
+check_rc 0 "rotate-only: changed egress IP succeeds"
+check_contains "$TMP/rotate.stderr" 'new egress IP: 203.0.113.1' "rotate-only: new egress IP is reported"
+
+run_rotate_only 2 1
+check_rc 2 "rotate-only: unchanged egress IP is a hard failure"
+check_contains "$TMP/rotate.stderr" 'did not change the WARP egress IP' "rotate-only: unchanged egress IP is explained"
 
 run_rotate "2"
 check_rc 2 "rotate: preflight no verdict stays fatal"

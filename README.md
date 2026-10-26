@@ -280,8 +280,11 @@ The wrapper handles both. If you drive opencode another way, you must too.
    `public`). It does not start opencode and does not create a session.
 3. If throttled, `warp-rotate.sh` / `warp-rotate.ps1` deletes the anonymous
    WARP registration, creates a new one, reconnects in proxy mode, and probes
-   again. It retries up to `WARP_ROTATE_ATTEMPTS` times (default 2), then warns
-   and lets opencode start anyway.
+   again. On Linux, it also compares the public egress IP before and after; a
+   registration that leaves the same IP is treated as a failed rotation,
+   because the probe would just hit the same bucket. It retries up to
+   `WARP_ROTATE_ATTEMPTS` times (default 2), then warns and lets opencode
+   start anyway.
 4. The probe itself never rotates. It sets `OPENCODE_WARP_NO_ROTATE=1`, so the
    wrapper it launches cannot start a recursive preflight.
 
@@ -415,8 +418,10 @@ CLI supports it.
   is the free bucket, not the OpenCode client identity — so an API-only server
   or a direct `curl` hits exactly the same quota.
 - **It does not guarantee a different IP.** WARP assigns an address from
-  Cloudflare's own pool; you cannot choose one. That is why the helper probes
-  after each rotation instead of assuming success.
+  Cloudflare's own pool; you cannot choose one. The Linux helper now reads the
+  egress IP before and after each rotation and fails if it did not change, so
+  a no-op rotation no longer looks successful while hitting the same throttled
+  bucket. The Windows helper still only checks that the proxy is reachable.
 - **It churns device registrations.** Every attempt creates a new anonymous
   Cloudflare device. Keep `WARP_ROTATE_ATTEMPTS` and
   `OPENCODE_WARP_PLUGIN_MAX_ROTATIONS` small.
@@ -517,7 +522,7 @@ startup policy, and the `serve`/`--server` argument routing. The Windows suite
 also checks profile install/remove behaviour, the `.cmd` shims, and rejects
 PowerShell 7-only syntax.
 
-Expected totals: **100** Linux checks and **186** Windows checks.
+Expected totals: **110** Linux checks and **186** Windows checks.
 
 ---
 

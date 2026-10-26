@@ -105,13 +105,38 @@ probe_ingress() {
   OPENCODE_WARP_NO_ROTATE=1 "$PROBE" >"$1" 2>&1
 }
 
+# Read the public egress IP through the WARP proxy. A rotation only helps if
+# this changes; a new registration that leaves the old tunnel up (or a host
+# already behind another WARP/NAT) keeps the same throttled bucket.
+egress_ip() {
+  local ip
+  # Use Cloudflare's trace endpoint, not ipify: it reports the same address
+  # family Cloudflare sees for the inference endpoint, and it is what
+  # probe.sh prints as the egress.
+  ip="$(curl -s --max-time 5 -x "$PROXY" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null \
+    | sed -n 's/^ip=//p' | head -1 | tr -d '[:space:]')" || return 1
+  case "$ip" in
+    ''|*[!0-9a-fA-F:.]*) return 1 ;;
+  esac
+  printf '%s\n' "$ip"
+}
+
 rotate_registration() {
-  local i status settings
+  local i status settings before_ip after_ip
 
   command -v warp-cli >/dev/null 2>&1 || { say "warp-cli not found"; return 1; }
 
+  before_ip="$(egress_ip 2>/dev/null || true)"
+  if [ -n "$before_ip" ]; then
+    say "current egress IP: $before_ip"
+  else
+    warn "could not read the current egress IP; rotation cannot be verified"
+  fi
+
   # Best effort: a connected client can refuse to delete its registration.
-  warp-cli --accept-tos disconnect >/dev/null 2>&1 || true
+  if ! warp-cli --accept-tos disconnect >/dev/null 2>&1; then
+    warn "warp-cli disconnect returned non-zero; continuing"
+  fi
 
   say "deleting the WARP device registration"
   warp-cli --accept-tos registration delete >/dev/null 2>&1 \
@@ -130,7 +155,9 @@ rotate_registration() {
     return 1
   fi
 
-  warp-cli --accept-tos connect >/dev/null 2>&1 || true
+  if ! warp-cli --accept-tos connect >/dev/null 2>&1; then
+    warn "warp-cli connect returned non-zero; checking the egress anyway"
+  fi
 
   # Capture, then match with `case`: pipelines plus `grep -q` under pipefail
   # report a false failure when warp-cli dies on SIGPIPE.
@@ -158,15 +185,29 @@ rotate_registration() {
     *) : ;;   # unknown settings format; the proxy probe below is the real test
   esac
 
-  # Status can say Connected before the local proxy accepts traffic.
+  # Status can say Connected before the local proxy accepts traffic. Reading
+  # the egress IP also proves the new registration is carrying traffic instead
+  # of the old tunnel staying connected.
+  after_ip=""
   for i in $(seq 1 15); do
-    if curl -s --max-time 3 -x "$PROXY" https://api.ipify.org >/dev/null 2>&1; then
-      return 0
+    if after_ip="$(egress_ip 2>/dev/null)"; then
+      break
     fi
     sleep 1
   done
-  say "proxy $PROXY is unreachable after rotation"
-  return 1
+  if [ -z "$after_ip" ]; then
+    say "proxy $PROXY is unreachable after rotation"
+    return 1
+  fi
+
+  if [ -n "$before_ip" ] && [ "$after_ip" = "$before_ip" ]; then
+    say "rotation did not change the WARP egress IP (still ${after_ip})"
+    say "the new registration is not carrying traffic; the old tunnel is still in use"
+    return 1
+  fi
+
+  say "new egress IP: $after_ip"
+  return 0
 }
 
 # Live-session path used by the OpenCode plugin. It must not run a model probe:
@@ -186,7 +227,7 @@ if [ "$ROTATE_ONLY" -eq 1 ]; then
   done
 
   state_write last-throttled
-  say "could not restore a reachable WARP proxy after ${ATTEMPTS} attempt(s)"
+  say "could not rotate the WARP egress after ${ATTEMPTS} attempt(s)"
   exit 2
 fi
 
@@ -227,11 +268,14 @@ if [ "$FORCE" -eq 0 ]; then
   say "ingress is throttled or failing"
 fi
 
+probe_failures=0
 for attempt in $(seq 1 "$ATTEMPTS"); do
   say "rotation attempt ${attempt}/${ATTEMPTS}"
   if ! rotate_registration; then
     state_write last-throttled
-    exit 2
+    say "rotation attempt ${attempt} failed"
+    [ "$attempt" -lt "$ATTEMPTS" ] && sleep 2
+    continue
   fi
 
   say "probing the new ingress"
@@ -239,8 +283,8 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
   rc=$?
   case "$rc" in
     0) : ;;
-    1) say "the new ingress is still throttled" ;;
-    3) say "the new ingress is resetting connections" ;;
+    1) say "the new ingress is still throttled"; probe_failures=$((probe_failures + 1)) ;;
+    3) say "the new ingress is resetting connections"; probe_failures=$((probe_failures + 1)) ;;
     *)
       say "no verdict after rotation; not retrying"
       tail -8 "$probe_out" | sed 's/^/  /' >&2
@@ -263,6 +307,10 @@ if [ "$rotated_ok" -eq 1 ]; then
 fi
 
 state_write last-throttled
-say "the WARP ingress is still not passing after ${ATTEMPTS} rotation attempt(s)"
-tail -8 "$probe_out" | sed 's/^/  /' >&2
-exit 1
+if [ "$probe_failures" -gt 0 ]; then
+  say "the WARP ingress is still not passing after ${ATTEMPTS} rotation attempt(s)"
+  tail -8 "$probe_out" | sed 's/^/  /' >&2
+  exit 1
+fi
+say "could not rotate the WARP egress after ${ATTEMPTS} attempt(s)"
+exit 2
