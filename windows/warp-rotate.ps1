@@ -26,15 +26,21 @@
 #                              real-time plugin during a live session)
 #
 # Environment:
-#   WARP_ROTATE_ATTEMPTS   rotation attempts (default 2)
+#   WARP_ROTATE_ATTEMPTS   rotation attempts (default 1)
 #   WARP_PROXY_PORT        WARP proxy port (default 40000)
 #   OPENCODE_WARP_PROBE    probe.ps1 path (default: next to this script,
 #                          then %LOCALAPPDATA%\opencode-warp\bin\probe.ps1)
+#   PROBE_MODE             api | cli | auto (default: cli here)
 #   PROBE_MODEL            forwarded to probe.ps1
 #   PROBE_RUN              forwarded to probe.ps1
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")
+
+# The raw API probe can be gated for free models: it does not send the real
+# OpenCode system prompt/tool payload. A rotation decision must match the
+# client, so use the CLI probe unless the caller explicitly chose a mode.
+if (-not $env:PROBE_MODE) { $env:PROBE_MODE = "cli" }
 
 $force = $false
 $rotateOnly = $false
@@ -50,7 +56,7 @@ foreach ($argument in $args) {
       Write-Output "  --force        rotate first, without probing the current ingress"
       Write-Output "  --rotate-only  rotate and verify the proxy, no opencode probe"
       Write-Output ""
-      Write-Output "Environment: WARP_ROTATE_ATTEMPTS (default 2), WARP_PROXY_PORT (default 40000)"
+      Write-Output "Environment: WARP_ROTATE_ATTEMPTS (default 1), WARP_PROXY_PORT (default 40000)"
       exit 0
     }
     default {
@@ -69,7 +75,7 @@ if ($env:WARP_PROXY_PORT) {
 }
 $proxy = "http://127.0.0.1:$port"
 
-$attempts = 2
+$attempts = 1
 if ($env:WARP_ROTATE_ATTEMPTS) {
   $parsedAttempts = 0
   if (-not ([int]::TryParse($env:WARP_ROTATE_ATTEMPTS, [ref]$parsedAttempts)) -or $parsedAttempts -lt 1) {

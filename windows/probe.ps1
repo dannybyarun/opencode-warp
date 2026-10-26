@@ -12,17 +12,23 @@
 # depend on the `run` subcommand or the `--standalone` flag. Set PROBE_MODE=cli
 # (or PROBE_RUN) to probe through `opencode run` instead.
 #
+# The raw API path can be gated for free models: it does not send the real
+# OpenCode system prompt/tool payload, so it may return 429 even when the CLI
+# succeeds on the same egress. The rotation helpers therefore default to
+# PROBE_MODE=cli. Use API mode for endpoint/transport checks, not as proof
+# that the TUI will fail.
+#
 # Exit codes:  0 = success
 #              1 = throttled (429 / free-tier quota)
 #              2 = no verdict (missing binary, auth error, timeout...)
 #              3 = transport failure through WARP (ECONNRESET and friends)
 #
-# Overrides:   PROBE_MODE     api | cli | auto (default: auto)
+# Overrides:   PROBE_MODE     api | cli | auto (default: auto; rotation helpers set cli)
 #              PROBE_API_URL  chat-completions endpoint
 #              PROBE_API_KEY  bearer token (default: public)
 #              PROBE_RUN      command/script to run in CLI mode (default: opencode-warp.ps1)
 #              PROBE_MODEL    model id (default: opencode/deepseek-v4.1-flash-free)
-#              PROXY          proxy url (default: WARP; set PROBE_DIRECT=1 for direct)
+#              PROXY          proxy url (default: WARP; set PROBE_DIRECT=1 for direct API mode)
 #              PROBE_TIMEOUT  seconds before giving up (default 45)
 #              PROBE_OUT      capture file
 #
@@ -98,13 +104,14 @@ $throttlePattern = "rate limit exceeded|free usage limit reached|freeusagelimite
 $cliThrottlePattern = $throttlePattern + "|429"
 
 function Write-Egress {
-  Write-Output "--- egress (WARP) ---"
   if ($proxy) {
+    Write-Output "--- egress (WARP) ---"
     foreach ($line in (Get-EgressTrace -Proxy $proxy)) {
       Write-Output $line
     }
   } else {
-    Write-Output "  (direct; PROXY is empty)"
+    Write-Output "--- egress (direct) ---"
+    Write-Output "  (PROXY is empty)"
   }
 }
 
@@ -248,6 +255,7 @@ function Invoke-ApiProbe {
     $cfray = Get-HeaderValue "cf-ray"
     if ($cfray) { Write-Output "  cf-ray     : $cfray" }
 
+    Write-Output "  hint       : free quota is per model; raw API mode can be gated, so try PROBE_MODE=cli or /models"
     Write-LogHint
     exit 1
   }
@@ -378,6 +386,7 @@ function Invoke-CliProbe {
         $_ -imatch $cliThrottlePattern
       } | Select-Object -First 2) | ForEach-Object { Write-Output "  opencode said: $_" }
 
+    Write-Output "  hint       : free quota is per model; if rotation did not help, switch models with /models"
     Write-LogHint
     exit 1
   }

@@ -8,6 +8,11 @@
  * If a rotation cannot be applied, it vetoes the retry instead of inheriting
  * the provider's multi-hour retry-after.
  *
+ * The free tier is now limited per model and tied to the egress/network, so a
+ * rotation only helps when the ingress itself is the problem. One rotation is
+ * attempted per session; if it does not help, the plugin fails fast instead
+ * of churning registrations. Switch models with /models to get a fresh bucket.
+ *
  * It only activates when all of these are true:
  *   - opencode is talking through 127.0.0.1:${WARP_PROXY_PORT}
  *     (i.e. --stand, or a `serve` started through the wrapper)
@@ -370,9 +375,11 @@ export default Plugin.define({
 
     const config = {
       freeOnly: opts.freeOnly ?? envBool("OPENCODE_WARP_PLUGIN_FREE_ONLY", true),
+      // One rotation is enough to test a new egress. A second usually lands
+      // on the same per-model bucket and only churns registrations.
       maxRotationsPerSession:
         opts.maxRotationsPerSession ??
-        envInt("OPENCODE_WARP_PLUGIN_MAX_ROTATIONS", 2),
+        envInt("OPENCODE_WARP_PLUGIN_MAX_ROTATIONS", 1),
       cooldownMs: opts.cooldownMs ?? envInt("OPENCODE_WARP_PLUGIN_COOLDOWN_MS", 5000),
       retryDelayMs: opts.retryDelayMs ?? envInt("OPENCODE_WARP_PLUGIN_RETRY_DELAY_MS", 1500),
       rotationTimeoutMs:

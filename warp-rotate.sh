@@ -24,18 +24,24 @@
 #                              real-time plugin during a live session)
 #
 # Environment:
-#   WARP_ROTATE_ATTEMPTS   rotation attempts (default 2)
+#   WARP_ROTATE_ATTEMPTS   rotation attempts (default 1)
 #   WARP_PROXY_PORT        WARP proxy port (default 40000)
 #   OPENCODE_WARP_PROBE    probe.sh path (default: next to this script,
 #                          then /usr/local/lib/opencode-warp/probe.sh)
+#   PROBE_MODE             api | cli | auto (default: cli here)
 #   PROBE_MODEL            forwarded to probe.sh
 #   PROBE_RUN              forwarded to probe.sh
 #
 set -uo pipefail
 
+# The raw API probe can be gated for free models: it does not send the real
+# OpenCode system prompt/tool payload. A rotation decision must match the
+# client, so use the CLI probe unless the caller explicitly chose a mode.
+export PROBE_MODE="${PROBE_MODE:-cli}"
+
 PORT="${WARP_PROXY_PORT:-40000}"
 PROXY="http://127.0.0.1:${PORT}"
-ATTEMPTS="${WARP_ROTATE_ATTEMPTS:-2}"
+ATTEMPTS="${WARP_ROTATE_ATTEMPTS:-1}"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/opencode-warp"
 
@@ -58,7 +64,7 @@ for arg in "$@"; do
     --force)       FORCE=1 ;;
     --rotate-only) ROTATE_ONLY=1 ;;
     -h|--help)
-      sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,/^set -uo pipefail$/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)

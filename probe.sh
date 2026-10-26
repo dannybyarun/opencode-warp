@@ -12,18 +12,24 @@
 # depend on the `run` subcommand or the `--standalone` flag. Set PROBE_MODE=cli
 # (or PROBE_RUN) to probe through `opencode run` instead.
 #
+# The raw API path can be gated for free models: it does not send the real
+# OpenCode system prompt/tool payload, so it may return 429 even when the CLI
+# succeeds on the same egress. The rotation helpers therefore default to
+# PROBE_MODE=cli. Use API mode for endpoint/transport checks, not as proof
+# that the TUI will fail.
+#
 # Exit codes:  0 = success
 #              1 = throttled (429 / free-tier quota)
 #              2 = no verdict (missing binary, auth error, timeout...)
 #              3 = transport failure through WARP (ECONNRESET and friends)
 #
-# Overrides:   PROBE_MODE     api | cli | auto (default: auto)
+# Overrides:   PROBE_MODE     api | cli | auto (default: auto; rotation helpers set cli)
 #              PROBE_API_URL  chat-completions endpoint
 #              PROBE_API_KEY  bearer token (default: public)
 #              PROBE_RUN      command to run in CLI mode (default: opencode-warp)
 #              PROBE_MODEL    model id (default: opencode/deepseek-v4.1-flash-free)
 #              PROXY          proxy url (empty = direct; default: WARP)
-#              PROBE_DIRECT   set to 1 to skip the proxy (same as PROXY="")
+#              PROBE_DIRECT   set to 1 to skip the proxy in API mode (same as PROXY="")
 #              PROBE_TIMEOUT  seconds before giving up (default 45)
 #              PROBE_OUT      capture file (default /tmp/probe.out)
 #
@@ -90,12 +96,13 @@ proxy_curl() {
 }
 
 print_egress() {
-  echo "--- egress (WARP) ---"
   if [ -n "$PROXY" ]; then
+    echo "--- egress (WARP) ---"
     proxy_curl -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace \
       | grep -E '^(ip|loc|warp)=' || true
   else
-    echo "  (direct; PROXY is empty)"
+    echo "--- egress (direct) ---"
+    echo "  (PROXY is empty)"
   fi
 }
 
@@ -182,6 +189,7 @@ probe_api() {
         ;;
     esac
     [ -n "$cfray" ] && echo "  cf-ray     : $cfray"
+    echo "  hint       : free quota is per model; raw API mode can be gated, so try PROBE_MODE=cli or /models"
     print_log_hint
     exit 1
   fi
@@ -241,6 +249,7 @@ probe_cli() {
   if grep -qiE 'rate limit exceeded|free usage limit reached|freeusagelimiterror|free messages|too many requests|429' "$OUT" 2>/dev/null; then
     echo "RESULT: THROTTLED (exit $rc)"
     grep -iE 'rate limit exceeded|free usage limit reached|freeusagelimiterror|free messages|too many requests|429' "$OUT" | head -2 | sed 's/^/  opencode said: /'
+    echo "  hint       : free quota is per model; if rotation did not help, switch models with /models"
     print_log_hint
     exit 1
   fi

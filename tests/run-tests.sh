@@ -396,7 +396,7 @@ chmod +x "$TMP/wrap/opencode-warp"
 write_fake "$TMP/wrap/warp-rotate.sh" '#!/usr/bin/env bash
 echo "fake rotate rc=$FAKE_ROTATE_RC" >&2
 if [ -n "${ROTATE_ENV_LOG:-}" ]; then
-  printf "PROBE_RUN=%s\nPROBE_MODEL=%s\n" "${PROBE_RUN:-}" "${PROBE_MODEL:-}" >"$ROTATE_ENV_LOG"
+  printf "PROBE_RUN=%s\nPROBE_MODEL=%s\nPROBE_MODE=%s\n" "${PROBE_RUN:-}" "${PROBE_MODEL:-}" "${PROBE_MODE:-}" >"$ROTATE_ENV_LOG"
 fi
 exit "$FAKE_ROTATE_RC"'
 
@@ -456,7 +456,8 @@ check_rc 0 "wrapper: healthy rotation starts opencode"
 check_contains "$TMP/opencode.log" 'ARGS=.*standalone' "wrapper: --standalone still injected"
 check_contains "$TMP/opencode.log" 'HTTPS_PROXY=http://127.0.0.1:40000' "wrapper: run gets WARP env"
 check_contains "$TMP/wrap.stdout" 'FAKE_OPENCODE_OK' "wrapper: opencode actually ran"
-check_contains "$TMP/rotate-env.log" '^PROBE_RUN=$' "wrapper: opencode models let the probe use the API"
+check_contains "$TMP/rotate-env.log" '^PROBE_MODE=cli$' "wrapper: opencode models use the CLI probe"
+check_contains "$TMP/rotate-env.log" '^PROBE_RUN=$' "wrapper: opencode models leave PROBE_RUN to probe.sh"
 check_contains "$TMP/rotate-env.log" '^PROBE_MODEL=opencode/deepseek-v4.1-flash-free$' "wrapper: the free model is forwarded to the probe"
 
 run_wrapper 0 "0" 0 run -m openrouter/some-free-model "hi"

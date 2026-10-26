@@ -275,18 +275,23 @@ The wrapper handles both. If you drive opencode another way, you must too.
    It only probes when that error is newer than the last successful check, so
    healthy launches do not pay for an extra request.
 2. `probe.sh` (Linux) or `probe.ps1` (Windows) sends one tiny `PONG` request
-   through WARP to the same OpenAI-compatible endpoint OpenCode uses
-   (`https://opencode.ai/inference/openai/v1/chat/completions`, bearer token
-   `public`). It does not start opencode and does not create a session.
+   through WARP. The rotation helpers run it with `PROBE_MODE=cli`, so the
+   verdict comes from the same `opencode run` path the TUI uses. That costs
+   one short model request and creates a session. Set `PROBE_MODE=api` to use
+   the cheaper raw endpoint instead — but the hosted endpoint can reject a
+   bare API request even when the real client succeeds, so API mode is not
+   authoritative for free models.
 3. If throttled, `warp-rotate.sh` / `warp-rotate.ps1` deletes the anonymous
    WARP registration, creates a new one, reconnects in proxy mode, and probes
    again. On Linux, it also compares the public egress IP before and after; a
    registration that leaves the same IP is treated as a failed rotation,
    because the probe would just hit the same bucket. It retries up to
-   `WARP_ROTATE_ATTEMPTS` times (default 2), then warns and lets opencode
+   `WARP_ROTATE_ATTEMPTS` times (default 1), then warns and lets opencode
    start anyway. Every probe also prints the observed `ip=`, `loc=`, and
    `warp=` egress — including failed attempts — so you can verify which
-   ingress the model request actually used.
+   ingress the model request actually used. A successful IP change still does
+   not guarantee a fresh per-model bucket; if the probe stays 429, switch
+   models instead of rotating again.
 4. The probe itself never rotates. It sets `OPENCODE_WARP_NO_ROTATE=1`, so the
    wrapper it launches cannot start a recursive preflight.
 
@@ -307,21 +312,22 @@ reachable**, and prints a warning. It refuses to start when the proxy itself is
 down, or when `OPENCODE_WARP_ROTATE_STRICT=1` is set.
 
 Each probe is a real model request (one short `PONG`), so it counts against
-your free-tier quota. It no longer creates a session or starts the CLI, which
-is why the log hint is still used instead of probing on every launch.
+your free-tier quota. The rotation helpers use the CLI probe, which creates a
+session; API mode does not. Either way, the log hint is used instead of
+probing on every launch to keep the cost down.
 
 | Variable | Meaning |
 |---|---|
 | `OPENCODE_WARP_AUTO_ROTATE=0` | disable all automatic rotation (launch-time and live plugin) |
 | `OPENCODE_WARP_FORCE_PROBE=1` | probe even if the log has no recent 429 |
-| `WARP_ROTATE_ATTEMPTS=3` | registration attempts (default 2) |
+| `WARP_ROTATE_ATTEMPTS=3` | registration attempts (default 1) |
 | `OPENCODE_WARP_ROTATE_STRICT=1` | exit instead of starting opencode when recovery fails or no verdict is available |
 | `OPENCODE_WARP_LOG=/path` | use a specific opencode log |
 | `PROBE_MODE=cli` | probe through `opencode run` instead of the raw API |
 | `PROBE_API_URL=...` | override the chat-completions endpoint |
 | `PROBE_API_KEY=...` | bearer token for the probe (default `public`) |
 | `PROBE_MODEL=...` | model id for the probe (default `opencode/deepseek-v4.1-flash-free`) |
-| `PROBE_DIRECT=1` | bypass the WARP proxy for the probe (same as `PROXY=""`) |
+| `PROBE_DIRECT=1` | bypass the WARP proxy for the raw API probe (API mode only) |
 | `OPENCODE_WARP_HOME=/path` | Windows per-user root (default `%LOCALAPPDATA%\opencode-warp`) |
 | `OPENCODE_WARP_STATE_DIR=/path` | override the `last-ok` / `last-throttled` state directory |
 | `OPENCODE_WARP_WARP_CLI=/path/warp-cli.exe` | Windows: override the WARP CLI path |
@@ -356,8 +362,11 @@ a hung session.
 One rotation is shared by all sessions. A successful rotation is offered to
 other sessions for 5 seconds without creating another registration; the
 session that used it will not rotate again inside that window. Each session is
-capped at two physical rotations. OpenCode's own hard retry-attempt limit still
-applies, so a session that has already exhausted its retries can still fail.
+capped at **one** physical rotation by default
+(`OPENCODE_WARP_PLUGIN_MAX_ROTATIONS`). One rotation is enough to test a new
+egress; a second usually lands on the same per-model bucket and only churns
+registrations. OpenCode's own hard retry-attempt limit still applies, so a
+session that has already exhausted its retries can still fail.
 
 The plugin appends its decisions to
 `~/.local/share/opencode/ratelimit-retry.jsonl` (`OPENCODE_RATELIMIT_LOG`
@@ -367,7 +376,7 @@ overrides the path). The file records every observed 429 with `retry-after` /
 | Variable | Meaning |
 |---|---|
 | `OPENCODE_WARP_PLUGIN=0` | disable the live plugin |
-| `OPENCODE_WARP_PLUGIN_MAX_ROTATIONS=3` | physical rotations per session (default 2) |
+| `OPENCODE_WARP_PLUGIN_MAX_ROTATIONS=3` | physical rotations per session (default 1) |
 | `OPENCODE_WARP_PLUGIN_COOLDOWN_MS=5000` | how long a fresh rotation is reusable |
 | `OPENCODE_WARP_PLUGIN_TIMEOUT_MS=90000` | rotation subprocess timeout |
 | `OPENCODE_WARP_PLUGIN_DEBUG=1` | log plugin decisions to stderr |
@@ -411,14 +420,21 @@ CLI supports it.
 
 ### What it still cannot do
 
-- **It does not make you immune to rate limits.** opencode's free tier
-  (`opencode.ai/inference`) enforces a daily quota that resets at **00:00 UTC**.
-  Switching IP does not remove the cap; it may move you to a different
-  bucket, or it may not.
-- **The endpoint is not client-locked.** The same `Authorization: Bearer
-  public` credential OpenCode uses works from any HTTP client. What limits you
-  is the free bucket, not the OpenCode client identity — so an API-only server
-  or a direct `curl` hits exactly the same quota.
+- **It does not make you immune to rate limits.** The free tier enforces a
+  **per-model** daily quota that resets at **00:00 UTC**. The bucket is also
+  tied to the network/egress, and VPN/proxy ranges can be pre-flagged. A new
+  WARP registration changes the IP and WARP account, but it does not reset a
+  per-model bucket. On 2026-10-26, DeepSeek/GLM/MiMo/Big Pickle were 429
+  through WARP while Nemotron/Beam were 200 on the same egress. DeepSeek, GLM,
+  Nemotron, and Beam were all 200 direct. If a 429 survives one rotation,
+  switch models with `/models` or use direct egress instead of rotating again.
+- **The raw endpoint is not a reliable quota probe for free models.** The
+  hosted endpoint now gates free models on the real OpenCode client; a bare
+  `Authorization: Bearer public` request with a minimal body can return
+  `FreeUsageLimitError` even when `opencode run` succeeds on the same egress.
+  Use `PROBE_MODE=cli` for a verdict that matches the client. Raw API mode is
+  still useful for checking the endpoint and transport, but its 429 is not
+  proof that the TUI will fail.
 - **It does not guarantee a different IP.** WARP assigns an address from
   Cloudflare's own pool; you cannot choose one. The Linux helper now reads the
   egress IP before and after each rotation and fails if it did not change, so
@@ -447,25 +463,44 @@ CLI supports it.
 - Native opencode on Windows is less battle-tested than WSL; upstream currently
   recommends WSL. That is independent of this wrapper.
 
-### What we actually observed
+### What we actually observed (2026-10-26)
 
-Tested with a controlled A/B on the same machine, same minute, same model —
-only the egress differed:
+The free-tier policy changed around 2026-10-25. The old model — one daily
+bucket per source IP — no longer explains the results. On the same machine,
+same minute, with OpenCode 2.1.4 and the real `opencode run` client:
 
-| Egress | Result |
-|---|---|
-| `35.252.208.177` (GCP NAT) | HTTP 429 `FreeUsageLimitError` |
-| `104.28.237.252` (WARP) | HTTP 200, normal completion |
-| three separate Tor exits | HTTP 429 (all of them) |
+| Egress | Model | Result |
+|---|---|---|
+| WARP `2a09:bac5:b040:3705::57b:b` (SEA) | `deepseek-v4.1-flash-free` | 429 `FreeUsageLimitError` |
+| WARP (same) | `glm-5.3-flash-free` | 429 |
+| WARP (same) | `mimo-v2.6-flash-free` | 429 |
+| WARP (same) | `big-pickle` | 429 |
+| WARP (same) | `nemotron-3.5-lightning-free` | 200 `PONG` |
+| WARP (same) | `beam-free` | 200 `PONG` |
+| direct `136.66.114.215` (SEA) | `deepseek-v4.1-flash-free` | 200 `PONG` |
+| direct (same) | `glm-5.3-flash-free` | 200 `PONG` |
+| direct (same) | `nemotron-3.5-lightning-free` | 200 `PONG` |
+| direct (same) | `beam-free` | 200 `PONG` |
+| Tor exits (US and NL) | `deepseek-v4.1-flash-free` | 429 |
 
-So the limit **is** determined by source IP. But WARP succeeded while Tor
-failed, which leaves open whether that was because WARP's address was simply
-an unthrottled IP, or because Cloudflare privileges its own WARP network on a
-Cloudflare-fronted service. **This repo cannot tell you which.**
+Rotation was verified to create a new WARP registration ID, account ID,
+license, and egress IP (`2a09:bac1:76a0:dba8::4ff:21` →
+`2a09:bac5:b040:3705::57b:b`). DeepSeek still returned 429 on the new IP. A
+fresh OpenCode project and session on a Tor exit also returned 429. So the
+quota is not keyed only by IP, project, or session.
 
-Also note: the difference is only observable *while your quota is spent*
-(i.e. before 00:00 UTC). After the reset both proxied and direct requests
-succeed, so the effect looks like nothing.
+The current service appears to enforce a **per-model free bucket tied to the
+egress/network**, with VPN/proxy ranges pre-flagged for the popular models.
+WARP's range is flagged for DeepSeek/GLM/MiMo/Big Pickle but not for
+Nemotron/Beam. Direct egress still has a fresh bucket for the tested models.
+`Retry-After` pointed at the 00:00 UTC reset.
+
+**The raw API probe is not a drop-in stand-in for the client.** At the same
+time `opencode run` returned `PONG` on direct egress, a minimal `curl` (and a
+Bun `fetch`) with `Authorization: Bearer public`, the CLI headers, and a
+minimal body returned 429. The real client sends a large OpenCode system
+prompt/tool payload; the hosted endpoint appears to gate free models on that
+client identity. Use `PROBE_MODE=cli` when the verdict must match the TUI.
 
 ---
 
@@ -524,7 +559,7 @@ startup policy, and the `serve`/`--server` argument routing. The Windows suite
 also checks profile install/remove behaviour, the `.cmd` shims, and rejects
 PowerShell 7-only syntax.
 
-Expected totals: **110** Linux checks and **186** Windows checks.
+Expected totals: **120** Linux checks and **187** Windows checks.
 
 ---
 

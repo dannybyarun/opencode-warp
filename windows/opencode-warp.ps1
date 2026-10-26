@@ -201,9 +201,12 @@ if (Test-PreflightNeeded) {
     $env:PROBE_MODEL = $requestedModel
   }
 
-  # probe.ps1 defaults to a raw API request for opencode models. Only hand it
-  # the wrapper path when the probe has to go through `opencode run` (a
-  # third-party provider), because PROBE_RUN forces CLI mode.
+  # The raw API probe can be gated for free models, so a rotation decision
+  # must use the real client. warp-rotate.ps1 defaults to CLI mode too; set it
+  # here as well so a custom rotation helper inherits the same contract. Only
+  # hand it the wrapper path when the probe has to go through `opencode run`
+  # (a third-party provider), because PROBE_RUN forces CLI mode.
+  if (-not $env:PROBE_MODE) { $env:PROBE_MODE = "cli" }
   $rotationEnv = @{ OPENCODE_WARP_NO_ROTATE = "1" }
   if ($requestedModel -and $requestedModel -notmatch "^opencode/") {
     $rotationEnv["PROBE_RUN"] = $self

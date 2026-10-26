@@ -229,9 +229,12 @@ if preflight_needed; then
   fi
 
   rc=0
-  # probe.sh defaults to a raw API request for opencode models. Only hand it
-  # the wrapper path when the probe has to go through `opencode run` (a
-  # third-party provider), because PROBE_RUN forces CLI mode.
+  # The raw API probe can be gated for free models, so a rotation decision
+  # must use the real client. warp-rotate.sh defaults to CLI mode too; set it
+  # here as well so a custom rotation helper inherits the same contract. Only
+  # hand it the wrapper path when the probe has to go through `opencode run`
+  # (a third-party provider), because PROBE_RUN forces CLI mode.
+  export PROBE_MODE="${PROBE_MODE:-cli}"
   case "$requested_model" in
     ''|opencode/*) : ;;
     *) export PROBE_RUN="${PROBE_RUN:-$SELF}" ;;

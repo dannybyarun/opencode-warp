@@ -577,7 +577,7 @@ $fakeRotate = Join-Path $Tmp "fake-rotate.ps1"
 Write-Mock $fakeRotate @'
 if ($env:ROTATE_LOG) { [IO.File]::AppendAllText($env:ROTATE_LOG, "rotate`n") }
 if ($env:ROTATE_ENV_LOG) {
-  $line = "PROBE_RUN=$($env:PROBE_RUN)`nPROBE_MODEL=$($env:PROBE_MODEL)`n"
+  $line = "PROBE_RUN=$($env:PROBE_RUN)`nPROBE_MODEL=$($env:PROBE_MODEL)`nPROBE_MODE=$($env:PROBE_MODE)`n"
   [IO.File]::WriteAllText($env:ROTATE_ENV_LOG, $line)
 }
 if ($env:FAKE_ROTATE_OUTPUT) { Write-Output $env:FAKE_ROTATE_OUTPUT }
@@ -619,6 +619,7 @@ function Invoke-Wrapper {
     ROTATE_ENV_LOG            = $rotateEnvLog
     PROBE_RUN                 = ""
     PROBE_MODEL               = ""
+    PROBE_MODE                = ""
     FAKE_ROTATE_RC            = [string]$RotateRc
     CURL_SEQ                  = (Join-Path $caseDir "curl-seq")
     CURL_RCS                  = (Join-Path $caseDir "curl-rcs")
@@ -652,7 +653,8 @@ Check-Contains $result.Calls "proxy=http://127.0.0.1:40000" "wrapper: HTTPS_PROX
 Check-Contains $result.Calls "no_proxy=127.0.0.1,localhost" "wrapper: NO_PROXY is injected"
 Check-NotContains $result.Calls "args=--stand " "wrapper: the --stand marker is stripped"
 Check-Contains $result.Rotations "rotate" "wrapper: preflight consulted the rotator"
-Check-NotContains $result.RotateEnv "PROBE_RUN=." "wrapper: opencode models let the probe use the API"
+Check-Contains $result.RotateEnv "PROBE_MODE=cli" "wrapper: opencode models use the CLI probe"
+Check-NotContains $result.RotateEnv "PROBE_RUN=." "wrapper: opencode models leave PROBE_RUN to probe.ps1"
 Check-Contains $result.RotateEnv "PROBE_MODEL=opencode/deepseek-v4.1-flash-free" "wrapper: the free model is forwarded to the probe"
 
 $result = Invoke-Wrapper -Arguments @("run", "-m", "openrouter/some-free-model", "hi")
