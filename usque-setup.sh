@@ -14,6 +14,7 @@
 # WARP identity. Use USQUE_REREGISTER=1 to deliberately replace it.
 #
 set -euo pipefail
+umask 077
 
 VERSION="${USQUE_VERSION:-v4.2.1}"
 PORT="${USQUE_PROXY_PORT:-40001}"
@@ -23,6 +24,8 @@ CONFIG="$CONFIG_DIR/config.json"
 BIN="${USQUE_BIN:-/usr/local/bin/usque}"
 SERVICE="/etc/systemd/system/usque-proxy.service"
 WRAPPER="/usr/local/bin/opencode-usque"
+HELPER_DIR="/usr/local/lib/opencode-warp"
+ROTATE="$HELPER_DIR/usque-rotate.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROXY_HOST="$BIND"
 if [ "$PROXY_HOST" = "0.0.0.0" ]; then
@@ -64,9 +67,9 @@ command -v systemctl >/dev/null 2>&1 || die "systemd is required"
 if [ "$MODE" = "uninstall" ]; then
   say "Removing the usque service"
   systemctl disable --now usque-proxy.service >/dev/null 2>&1 || true
-  rm -f "$SERVICE" "$WRAPPER"
+  rm -f "$SERVICE" "$WRAPPER" "$ROTATE"
   systemctl daemon-reload
-  ok "service and opencode-usque removed"
+  ok "service, opencode-usque, and usque-rotate.sh removed"
 
   if [ "$PURGE" -eq 1 ]; then
     say "Removing the usque binary and registration"
@@ -133,11 +136,28 @@ install -d -m 0750 "$CONFIG_DIR"
 if [ -f "$CONFIG" ] && [ "${USQUE_REREGISTER:-0}" != "1" ]; then
   ok "keeping existing $CONFIG"
 else
+  BACKUP=""
   if [ -f "$CONFIG" ]; then
     say "Re-registering at the request of USQUE_REREGISTER=1"
-    rm -f "$CONFIG"
+    # Stop the service first: registration must not race the running tunnel,
+    # and the request must go direct, not through the proxy that is stopping.
+    systemctl stop usque-proxy.service >/dev/null 2>&1 || true
+    BACKUP="${CONFIG}.setup.$$"
+    mv "$CONFIG" "$BACKUP"
   fi
-  "$BIN" -c "$CONFIG" register -a -n "$(hostname 2>/dev/null || echo opencode-warp)-opencode-warp"
+  if ! env \
+      -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+      -u http_proxy -u https_proxy -u all_proxy \
+      "$BIN" -c "$CONFIG" register -a -n "$(hostname 2>/dev/null || echo opencode-warp)-opencode-warp"; then
+    if [ -n "$BACKUP" ] && [ -f "$BACKUP" ]; then
+      rm -f "$CONFIG"
+      mv "$BACKUP" "$CONFIG"
+      chmod 600 "$CONFIG"
+      systemctl start usque-proxy.service >/dev/null 2>&1 || true
+    fi
+    die "usque registration failed; the previous registration was kept"
+  fi
+  [ -n "$BACKUP" ] && rm -f "$BACKUP"
   ok "registered a new WARP account"
 fi
 chmod 600 "$CONFIG"
@@ -167,9 +187,16 @@ if ! systemctl restart usque-proxy.service; then
 fi
 ok "usque-proxy.service enabled on ${BIND}:${PORT}"
 
-say "Installing opencode-usque"
+say "Installing opencode-usque and the rotation helper"
 install -m 0755 "$SCRIPT_DIR/opencode-usque" "$WRAPPER"
-ok "installed $WRAPPER"
+install -d -m 0755 "$HELPER_DIR"
+install -m 0755 "$SCRIPT_DIR/usque-rotate.sh" "$ROTATE"
+# The launch-time preflight needs probe.sh. setup.sh normally installed it
+# already; installing it here keeps usque-setup.sh usable on its own.
+if [ -f "$SCRIPT_DIR/probe.sh" ]; then
+  install -m 0755 "$SCRIPT_DIR/probe.sh" "$HELPER_DIR/probe.sh"
+fi
+ok "installed $WRAPPER and $ROTATE"
 
 say "Waiting for the proxy"
 READY=0
