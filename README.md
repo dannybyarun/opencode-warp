@@ -75,6 +75,51 @@ ingress and rotates the anonymous registration before starting. A plugin also
 handles a 429 that happens mid-session. See
 [Automatic recovery](#automatic-recovery-when-already-rate-limited).
 
+## Optional: usque IPv4 MASQUE proxy
+
+Official WARP can egress over IPv6 ranges that some providers flag. `usque` is
+an open-source MASQUE client that can provide an IPv4 egress and expose it as
+a local HTTP proxy. Install it as a systemd service on `127.0.0.1:40001`:
+
+```bash
+sudo ./usque-setup.sh
+```
+
+The installer downloads a pinned `usque` release, verifies its SHA-256
+checksum, registers an anonymous WARP account if `/etc/usque/config.json` does
+not exist, and enables `usque-proxy.service`. The registration is written with
+mode `600` and is never stored in this repository.
+
+`opencode-warp` prefers a running usque proxy on `127.0.0.1:40001` and falls
+back to official WARP on `127.0.0.1:40000` when it is not available. The
+normal command works unchanged:
+
+```bash
+opencode --stand run -m opencode/deepseek-v4.1-flash-free "hello"
+```
+
+Force usque in any shell:
+
+```bash
+opencode-usque run -m opencode/deepseek-v4.1-flash-free "hello"
+```
+
+Automatic WARP rotation is disabled while usque is selected, because
+`warp-rotate.sh` and the live plugin rotate the official WARP registration. To
+deliberately get a fresh usque identity:
+
+```bash
+sudo USQUE_REREGISTER=1 ./usque-setup.sh
+```
+
+Remove the service and wrapper (the registration is kept):
+
+```bash
+sudo ./usque-setup.sh --uninstall
+```
+
+Use `--purge` to also remove `/etc/usque` and the `usque` binary.
+
 ## Supported systems
 
 | Platform | Status |
@@ -319,6 +364,9 @@ probing on every launch to keep the cost down.
 | Variable | Meaning |
 |---|---|
 | `OPENCODE_WARP_AUTO_ROTATE=0` | disable all automatic rotation (launch-time and live plugin) |
+| `OPENCODE_WARP_USQUE=0` | force official WARP; disable usque auto-detection |
+| `USQUE_PROXY_PORT=40001` | usque HTTP proxy port |
+| `USQUE_REREGISTER=1` | `usque-setup.sh`: replace the existing registration |
 | `OPENCODE_WARP_FORCE_PROBE=1` | probe even if the log has no recent 429 |
 | `WARP_ROTATE_ATTEMPTS=3` | registration attempts (default 1) |
 | `OPENCODE_WARP_ROTATE_STRICT=1` | exit instead of starting opencode when recovery fails or no verdict is available |
@@ -509,7 +557,10 @@ client identity. Use `PROBE_MODE=cli` when the verdict must match the TUI.
 | Path | Purpose |
 |---|---|
 | `setup.sh` | Linux installer (idempotent, safe to re-run) |
+| `usque-setup.sh` | optional Linux installer for the usque IPv4 MASQUE proxy (`--uninstall`, `--purge`) |
+| `usque-proxy.service.in` | systemd unit template used by `usque-setup.sh` |
 | `opencode-warp` | Linux wrapper; installed to `/usr/local/bin` |
+| `opencode-usque` | wrapper that forces the usque proxy; installed to `/usr/local/bin` |
 | `uninstall.sh` | removes the Linux wrapper, helpers, bashrc block, apt repo |
 | `probe.sh` | one-shot verdict: is this ingress throttled? Raw API by default; `0` ok, `1` throttled, `2` no verdict, `3` transport failure |
 | `warp-rotate.sh` | probe → rotate device registration → probe (`0` ok, `1` still throttled/failing, `2` no verdict) |
@@ -559,7 +610,7 @@ startup policy, and the `serve`/`--server` argument routing. The Windows suite
 also checks profile install/remove behaviour, the `.cmd` shims, and rejects
 PowerShell 7-only syntax.
 
-Expected totals: **120** Linux checks and **187** Windows checks.
+Expected totals: **129** Linux checks and **187** Windows checks.
 
 ---
 
@@ -570,6 +621,8 @@ Linux:
 ```bash
 sudo ./uninstall.sh            # wrapper + helpers + bashrc block + apt repo
 sudo ./uninstall.sh --purge    # also the package and device registration
+sudo ./usque-setup.sh --uninstall   # usque service + opencode-usque
+sudo ./usque-setup.sh --purge       # also the usque binary + registration
 ```
 
 Windows:
@@ -603,6 +656,11 @@ When auto-recovery triggers — at launch or through the live plugin —
 creates a new one. The launch-time path only does so when opencode's log shows
 a recent rate-limit error (or when you pass `--force`); the live path only does
 so after a 429 from a free model through the WARP proxy.
+
+`usque-setup.sh` creates a **separate** anonymous registration through usque
+and stores it in `/etc/usque/config.json` with mode `600`. It is independent of
+the official WARP registration, is never written to this repository, and is
+removed only by `usque-setup.sh --purge`.
 
 ---
 

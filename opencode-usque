@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#
+# opencode-usque - run opencode through the usque MASQUE HTTP proxy.
+#
+# usque is managed by usque-proxy.service and listens on 127.0.0.1:40001 by
+# default. This wrapper starts the service if it is stopped, then delegates to
+# opencode-warp with the usque port selected.
+#
+set -euo pipefail
+
+PORT="${USQUE_PROXY_PORT:-40001}"
+PROXY="http://127.0.0.1:${PORT}"
+OPENCODE_WARP="${OPENCODE_WARP_BIN:-/usr/local/bin/opencode-warp}"
+
+proxy_ok() {
+  curl -s --max-time 2 -x "$PROXY" https://api.ipify.org >/dev/null 2>&1
+}
+
+if ! proxy_ok; then
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl start usque-proxy.service >/dev/null 2>&1 || true
+  fi
+  for _ in $(seq 1 30); do
+    if proxy_ok; then break; fi
+    sleep 0.5
+  done
+fi
+
+if ! proxy_ok; then
+  printf 'opencode-usque: usque proxy on %s is not reachable\n' "$PROXY" >&2
+  printf '  check: systemctl status usque-proxy.service\n' >&2
+  printf '  setup: sudo ./usque-setup.sh\n' >&2
+  exit 1
+fi
+
+if [ ! -x "$OPENCODE_WARP" ]; then
+  printf 'opencode-usque: %s is not executable\n' "$OPENCODE_WARP" >&2
+  printf '  run setup.sh first, or set OPENCODE_WARP_BIN=/path/to/opencode-warp\n' >&2
+  exit 127
+fi
+
+export WARP_PROXY_PORT="$PORT"
+export OPENCODE_WARP_AUTO_ROTATE=0
+export OPENCODE_WARP_PLUGIN=0
+
+exec "$OPENCODE_WARP" "$@"

@@ -1,0 +1,16 @@
+# Runtime artifacts from local probes and wrappers
+*.pid
+*.log
+*.out
+
+# Local environment and credentials. The usque registration contains a WARP
+# private key, license, and access token; it must never be committed.
+.env
+.env.*
+!.env.example
+config.json
+usque/config.json
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db

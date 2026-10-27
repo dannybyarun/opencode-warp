@@ -1,0 +1,17 @@
+[Unit]
+Description=usque MASQUE HTTP proxy for OpenCode
+Documentation=https://github.com/Diniboy1123/usque
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@USQUE_BIN@ -c @USQUE_CONFIG@ http-proxy -b @USQUE_BIND@ -p @USQUE_PORT@
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
