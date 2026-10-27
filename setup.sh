@@ -327,6 +327,10 @@ cat <<EOF
 
     ${PLUGIN_DIR}/opencode-warp-rotate.ts
 
+  Optional IPv4 MASQUE backend (avoids flagged WARP IPv6 ranges):
+
+    sudo ./usque-setup.sh
+
   NOTE: the 'run' subcommand is still required for one-shot prompts; --stand
   only adds --standalone (except for serve/--server, which must not get it).
 EOF

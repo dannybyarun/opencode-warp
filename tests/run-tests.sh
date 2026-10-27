@@ -413,6 +413,8 @@ case "${1:-}" in
   --version) echo "opencode fake"; exit 0 ;;
 esac
 printf "HTTPS_PROXY=%s\n" "${HTTPS_PROXY:-}" >>"$OPENCODE_CALL_LOG"
+printf "AUTO_ROTATE=%s\n" "${OPENCODE_WARP_AUTO_ROTATE:-}" >>"$OPENCODE_CALL_LOG"
+printf "PLUGIN=%s\n" "${OPENCODE_WARP_PLUGIN:-}" >>"$OPENCODE_CALL_LOG"
 printf "ARGS=%s\n" "$*" >>"$OPENCODE_CALL_LOG"
 echo "FAKE_OPENCODE_OK"
 exit 0'
@@ -438,6 +440,7 @@ run_wrapper() {
   HTTPS_PROXY="" HTTP_PROXY="" https_proxy="" http_proxy="" \
   NO_PROXY="" no_proxy="" \
   PROBE_RUN="" PROBE_MODEL="" \
+  OPENCODE_WARP_USQUE=0 \
   OPENCODE_WARP_FORCE_PROBE="${FORCE_PROBE:-1}" \
   OPENCODE_WARP_LOG="${LOG_PATH:-}" \
   OPENCODE_WARP_ROTATE_STRICT="$strict" \
@@ -451,6 +454,44 @@ run_wrapper() {
   RC=$?
 }
 
+run_wrapper_usque() {
+  mkdir -p "$TMP/fakeusque" "$TMP/fakeusquecurl"
+  write_fake "$TMP/fakeusque/pgrep" '#!/usr/bin/env bash
+[ "${1:-}" = "-x" ] && [ "${2:-}" = "usque" ] && exit 0
+exit 1'
+  write_fake "$TMP/fakeusque/systemctl" '#!/usr/bin/env bash
+[ "${1:-}" = "is-active" ] && [ "${2:-}" = "--quiet" ] \
+  && [ "${3:-}" = "usque-proxy.service" ] && exit 0
+exit 1'
+  write_fake "$TMP/fakeusquecurl/curl" '#!/usr/bin/env bash
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-x" ] && [ "$arg" = "http://127.0.0.1:40001" ]; then
+    exit 0
+  fi
+  prev="$arg"
+done
+exit 1'
+  : >"$TMP/opencode.log"
+  PATH="$TMP/fakeopencode:$TMP/fakeusque:$TMP/fakeusquecurl:$PATH" \
+  OPCODE_REAL="$TMP/fakeopencode/opencode" \
+  XDG_CACHE_HOME="$TMP/wcache" \
+  HTTPS_PROXY="" HTTP_PROXY="" https_proxy="" http_proxy="" \
+  NO_PROXY="" no_proxy="" \
+  PROBE_RUN="" PROBE_MODEL="" \
+  OPENCODE_WARP_USQUE=1 \
+  OPENCODE_WARP_FORCE_PROBE=0 \
+  OPENCODE_WARP_LOG="" \
+  OPENCODE_WARP_ROTATE_STRICT=0 \
+  ROTATE_ENV_LOG="$TMP/rotate-env.log" \
+  CURL_SEQ="$TMP/curl-seq" \
+  CURL_RCS="$TMP/curl-rcs" \
+  OPENCODE_CALL_LOG="$TMP/opencode.log" \
+    "$TMP/wrap/opencode-warp" run -m opencode/deepseek-v4.1-flash-free "hi" \
+      >"$TMP/wrap.stdout" 2>"$TMP/wrap.stderr"
+  RC=$?
+}
+
 run_wrapper 0 "0" 0 run -m opencode/deepseek-v4.1-flash-free "hi"
 check_rc 0 "wrapper: healthy rotation starts opencode"
 check_contains "$TMP/opencode.log" 'ARGS=.*standalone' "wrapper: --standalone still injected"
@@ -459,6 +500,13 @@ check_contains "$TMP/wrap.stdout" 'FAKE_OPENCODE_OK' "wrapper: opencode actually
 check_contains "$TMP/rotate-env.log" '^PROBE_MODE=cli$' "wrapper: opencode models use the CLI probe"
 check_contains "$TMP/rotate-env.log" '^PROBE_RUN=$' "wrapper: opencode models leave PROBE_RUN to probe.sh"
 check_contains "$TMP/rotate-env.log" '^PROBE_MODEL=opencode/deepseek-v4.1-flash-free$' "wrapper: the free model is forwarded to the probe"
+
+run_wrapper_usque
+check_rc 0 "wrapper: usque auto-detection starts opencode"
+check_contains "$TMP/opencode.log" 'HTTPS_PROXY=http://127.0.0.1:40001' "wrapper: usque proxy is selected"
+check_contains "$TMP/opencode.log" '^AUTO_ROTATE=0$' "wrapper: usque disables official rotation"
+check_contains "$TMP/opencode.log" '^PLUGIN=0$' "wrapper: usque disables the live rotation plugin"
+check_contains "$TMP/opencode.log" 'ARGS=.*standalone' "wrapper: usque still injects --standalone"
 
 run_wrapper 0 "0" 0 run -m openrouter/some-free-model "hi"
 check_rc 0 "wrapper: third-party free models still run"
@@ -544,6 +592,14 @@ check_not_contains "$TMP/wrap.stderr" 'fake rotate' "wrapper: paid model skips f
 # ------------------------------------------------------------ installer URLs
 check_contains "$ROOT/setup.sh" 'OPENCODE_INSTALL_URL="https://opencode\.ai/v2/install"' "setup: uses the OpenCode 2 installer"
 check_not_contains "$ROOT/setup.sh" 'OPENCODE_INSTALL_URL="https://opencode\.ai/install"' "setup: does not use the OpenCode 1 installer"
+
+# ------------------------------------------------------------------- usque
+bash -n "$ROOT/usque-setup.sh"
+check_rc 0 "usque: installer parses"
+bash -n "$ROOT/opencode-usque"
+check_rc 0 "usque: wrapper parses"
+check_contains "$ROOT/usque-setup.sh" 'sha256sum' "usque: installer verifies the checksum"
+check_contains "$ROOT/usque-proxy.service.in" '@USQUE_PORT@' "usque: service template is parameterized"
 
 # ------------------------------------------------------------------ summary
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

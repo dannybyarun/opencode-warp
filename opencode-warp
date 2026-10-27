@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 #
-# opencode-warp - run opencode through the local Cloudflare WARP proxy.
+# opencode-warp - run opencode through a local Cloudflare WARP or usque proxy.
 #
-# WARP runs in *proxy* mode on 127.0.0.1:40000, so this does not touch the
-# machine's normal routing. Two things are injected:
+# Official WARP runs in *proxy* mode on 127.0.0.1:40000. usque, an open-source
+# MASQUE client, can provide an IPv4 egress on 127.0.0.1:40001. When both are
+# available, usque is preferred because some providers flag the official WARP
+# IPv6 range. Set OPENCODE_WARP_USQUE=0 to force official WARP.
 #
-#   HTTPS_PROXY / HTTP_PROXY  -> send outbound traffic through WARP
+# Two things are injected:
+#
+#   HTTPS_PROXY / HTTP_PROXY  -> send outbound traffic through the proxy
 #   NO_PROXY                  -> opencode MUST still reach its own local
 #                                background service, otherwise it 502s and
 #                                dies with `service.ensure` errors
@@ -17,7 +21,43 @@
 #
 set -euo pipefail
 
-PORT="${WARP_PROXY_PORT:-40000}"
+USQUE_PORT="${USQUE_PROXY_PORT:-40001}"
+USQUE_AUTO="${OPENCODE_WARP_USQUE:-auto}"
+USING_USQUE=0
+
+case "$USQUE_AUTO" in
+  0|no|off|false|False) USQUE_AUTO=0 ;;
+  *) USQUE_AUTO=1 ;;
+esac
+
+proxy_ok() {
+  curl -s --max-time 2 -x "$1" https://api.ipify.org >/dev/null 2>&1
+}
+
+usque_running() {
+  if command -v pgrep >/dev/null 2>&1 && pgrep -x usque >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v systemctl >/dev/null 2>&1 \
+     && systemctl is-active --quiet usque-proxy.service 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+if [ -n "${WARP_PROXY_PORT:-}" ]; then
+  PORT="$WARP_PROXY_PORT"
+  if [ "$PORT" = "$USQUE_PORT" ]; then
+    USING_USQUE=1
+  fi
+elif [ "$USQUE_AUTO" -eq 1 ] \
+     && usque_running \
+     && proxy_ok "http://127.0.0.1:${USQUE_PORT}"; then
+  PORT="$USQUE_PORT"
+  USING_USQUE=1
+else
+  PORT=40000
+fi
 PROXY="http://127.0.0.1:${PORT}"
 SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
 SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
@@ -151,6 +191,24 @@ find_rotate() {
   return 1
 }
 
+# usque has its own WARP registration. warp-rotate.sh and the live plugin only
+# know how to rotate the official WARP client, so running them against a usque
+# proxy would churn the wrong registration and still leave the 429 in place.
+if [ "$USING_USQUE" -eq 1 ]; then
+  case "${OPENCODE_WARP_AUTO_ROTATE:-}" in
+    1|yes|on|true|True)
+      printf 'opencode-warp: usque is active; automatic WARP rotation is disabled\n' >&2
+      ;;
+  esac
+  case "${OPENCODE_WARP_PLUGIN:-}" in
+    1|yes|on|true|True)
+      printf 'opencode-warp: usque is active; the live WARP rotation plugin is disabled\n' >&2
+      ;;
+  esac
+  export OPENCODE_WARP_AUTO_ROTATE=0
+  export OPENCODE_WARP_PLUGIN=0
+fi
+
 AUTO_ROTATE="${OPENCODE_WARP_AUTO_ROTATE:-1}"
 case "$AUTO_ROTATE" in
   0|no|off|false|False) AUTO_ROTATE=0 ;;
@@ -204,15 +262,32 @@ if [ "$MODE" = "standalone" ]; then
 fi
 
 if ! probe; then
-  # WARP may simply not be connected yet - try to bring it up rather than fail.
-  if command -v warp-cli >/dev/null 2>&1; then
-    warp-cli connect >/dev/null 2>&1 || true
-    sleep 4
+  if [ "$USING_USQUE" -eq 1 ]; then
+    # The service is enabled at boot; try to start it if it was stopped.
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl start usque-proxy.service >/dev/null 2>&1 || true
+      for _ in $(seq 1 20); do
+        if probe; then break; fi
+        sleep 0.5
+      done
+    fi
+  else
+    # WARP may simply not be connected yet - try to bring it up rather than fail.
+    if command -v warp-cli >/dev/null 2>&1; then
+      warp-cli connect >/dev/null 2>&1 || true
+      sleep 4
+    fi
   fi
   if ! probe; then
-    printf 'opencode-warp: WARP proxy unreachable on %s\n' "$PROXY" >&2
-    printf '  check: warp-cli status\n' >&2
-    printf '  setup: ./setup.sh\n' >&2
+    if [ "$USING_USQUE" -eq 1 ]; then
+      printf 'opencode-warp: usque proxy unreachable on %s\n' "$PROXY" >&2
+      printf '  check: systemctl status usque-proxy.service\n' >&2
+      printf '  setup: sudo ./usque-setup.sh\n' >&2
+    else
+      printf 'opencode-warp: WARP proxy unreachable on %s\n' "$PROXY" >&2
+      printf '  check: warp-cli status\n' >&2
+      printf '  setup: ./setup.sh\n' >&2
+    fi
     exit 1
   fi
 fi

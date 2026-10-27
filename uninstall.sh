@@ -82,4 +82,10 @@ else
   printf '   Re-run with --purge to remove the package + device registration.)\n'
 fi
 
+if [ -f /etc/systemd/system/usque-proxy.service ] \
+   || [ -x /usr/local/bin/opencode-usque ]; then
+  printf '\n  usque is installed separately. Remove it with:\n'
+  printf '    sudo ./usque-setup.sh --uninstall\n'
+fi
+
 say "Done. Open a new shell for the change to take effect."
