@@ -40,7 +40,8 @@ if [ ! -x "$OPENCODE_WARP" ]; then
 fi
 
 export WARP_PROXY_PORT="$PORT"
-export OPENCODE_WARP_AUTO_ROTATE=0
-export OPENCODE_WARP_PLUGIN=0
 
+# opencode-warp detects the usque port, points both its launch-time preflight
+# and the live 429 plugin at usque-rotate.sh, and keeps the official WARP
+# rotation paths out of the way.
 exec "$OPENCODE_WARP" "$@"

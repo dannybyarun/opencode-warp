@@ -104,15 +104,33 @@ Force usque in any shell:
 opencode-usque run -m opencode/deepseek-v4.1-flash-free "hello"
 ```
 
-Automatic WARP rotation is disabled while usque is selected, because
-`warp-rotate.sh` and the live plugin rotate the official WARP registration. To
-deliberately get a fresh usque identity:
+Automatic recovery works on the usque path too. When usque is selected,
+`opencode-warp` points its launch-time preflight and the live 429 plugin at
+`usque-rotate.sh` instead of `warp-rotate.sh`. The helper stops the service,
+moves the old registration aside, enrolls a new anonymous WARP account,
+restarts `usque-proxy.service`, and verifies that the new account is serving
+traffic. Cloudflare can assign the same egress IP to different usque accounts,
+so success is based on a changed registration ID plus a reachable `warp=on`
+proxy, not on the IP changing.
+
+The live plugin still rotates at most once per session. The launch-time path
+rotates only when the probe reports throttling, a transport failure, or
+`--force` is passed. Live rotation runs as the user that started OpenCode and
+needs passwordless sudo for the service and registration commands; if sudo
+prompts for a password, the plugin fails fast instead of hanging. Manual
+recovery:
+
+```bash
+sudo ./usque-rotate.sh --rotate-only
+```
+
+To replace the registration during setup instead:
 
 ```bash
 sudo USQUE_REREGISTER=1 ./usque-setup.sh
 ```
 
-Remove the service and wrapper (the registration is kept):
+Remove the service, wrapper, and rotation helper (the registration is kept):
 
 ```bash
 sudo ./usque-setup.sh --uninstall
@@ -366,9 +384,12 @@ probing on every launch to keep the cost down.
 | `OPENCODE_WARP_AUTO_ROTATE=0` | disable all automatic rotation (launch-time and live plugin) |
 | `OPENCODE_WARP_USQUE=0` | force official WARP; disable usque auto-detection |
 | `USQUE_PROXY_PORT=40001` | usque HTTP proxy port |
+| `USQUE_ROTATE_ATTEMPTS=3` | usque registration attempts (default 1) |
+| `USQUE_CONFIG=/etc/usque/config.json` | usque registration path |
+| `USQUE_SERVICE=usque-proxy.service` | systemd unit restarted during rotation |
 | `USQUE_REREGISTER=1` | `usque-setup.sh`: replace the existing registration |
 | `OPENCODE_WARP_FORCE_PROBE=1` | probe even if the log has no recent 429 |
-| `WARP_ROTATE_ATTEMPTS=3` | registration attempts (default 1) |
+| `WARP_ROTATE_ATTEMPTS=3` | official WARP registration attempts (default 1) |
 | `OPENCODE_WARP_ROTATE_STRICT=1` | exit instead of starting opencode when recovery fails or no verdict is available |
 | `OPENCODE_WARP_LOG=/path` | use a specific opencode log |
 | `PROBE_MODE=cli` | probe through `opencode run` instead of the raw API |
@@ -559,6 +580,7 @@ client identity. Use `PROBE_MODE=cli` when the verdict must match the TUI.
 | `setup.sh` | Linux installer (idempotent, safe to re-run) |
 | `usque-setup.sh` | optional Linux installer for the usque IPv4 MASQUE proxy (`--uninstall`, `--purge`) |
 | `usque-proxy.service.in` | systemd unit template used by `usque-setup.sh` |
+| `usque-rotate.sh` | usque probe → re-register account → restart service → verify (`0` ok, `1` still throttled/failing, `2` no verdict) |
 | `opencode-warp` | Linux wrapper; installed to `/usr/local/bin` |
 | `opencode-usque` | wrapper that forces the usque proxy; installed to `/usr/local/bin` |
 | `uninstall.sh` | removes the Linux wrapper, helpers, bashrc block, apt repo |
@@ -610,7 +632,7 @@ startup policy, and the `serve`/`--server` argument routing. The Windows suite
 also checks profile install/remove behaviour, the `.cmd` shims, and rejects
 PowerShell 7-only syntax.
 
-Expected totals: **129** Linux checks and **187** Windows checks.
+Expected totals: **185** Linux checks and **187** Windows checks.
 
 ---
 
@@ -621,7 +643,7 @@ Linux:
 ```bash
 sudo ./uninstall.sh            # wrapper + helpers + bashrc block + apt repo
 sudo ./uninstall.sh --purge    # also the package and device registration
-sudo ./usque-setup.sh --uninstall   # usque service + opencode-usque
+sudo ./usque-setup.sh --uninstall   # usque service + wrapper + rotate helper
 sudo ./usque-setup.sh --purge       # also the usque binary + registration
 ```
 
@@ -660,7 +682,8 @@ so after a 429 from a free model through the WARP proxy.
 `usque-setup.sh` creates a **separate** anonymous registration through usque
 and stores it in `/etc/usque/config.json` with mode `600`. It is independent of
 the official WARP registration, is never written to this repository, and is
-removed only by `usque-setup.sh --purge`.
+removed only by `usque-setup.sh --purge`. When usque auto-recovery triggers,
+`usque-rotate.sh` replaces that registration with a new anonymous one.
 
 ---
 

@@ -59,6 +59,14 @@ else
   PORT=40000
 fi
 PROXY="http://127.0.0.1:${PORT}"
+export WARP_PROXY_PORT="$PORT"
+if [ "$USING_USQUE" -eq 1 ]; then
+  INGRESS="usque"
+  INGRESS_CHECK="systemctl status usque-proxy.service"
+else
+  INGRESS="WARP"
+  INGRESS_CHECK="warp-cli status"
+fi
 SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
 SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/opencode-warp"
@@ -183,30 +191,39 @@ preflight_needed() {
   [ "$rl" -gt "$ok" ]
 }
 
-find_rotate() {
+find_usque_rotate() {
   local p
+  for p in "$SELF_DIR/usque-rotate.sh" "/usr/local/lib/opencode-warp/usque-rotate.sh"; do
+    if [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
+  done
+  return 1
+}
+
+find_rotate() {
+  local p="${OPENCODE_WARP_ROTATE:-}"
+  if [ -n "$p" ] && [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
+  if [ "$USING_USQUE" -eq 1 ]; then
+    find_usque_rotate
+    return
+  fi
   for p in "$SELF_DIR/warp-rotate.sh" "/usr/local/lib/opencode-warp/warp-rotate.sh"; do
     if [ -x "$p" ]; then printf '%s\n' "$p"; return 0; fi
   done
   return 1
 }
 
-# usque has its own WARP registration. warp-rotate.sh and the live plugin only
-# know how to rotate the official WARP client, so running them against a usque
-# proxy would churn the wrong registration and still leave the 429 in place.
+# usque has its own WARP registration. Point both the launch-time preflight and
+# the live plugin at usque-rotate.sh instead of the official warp-rotate.sh.
 if [ "$USING_USQUE" -eq 1 ]; then
-  case "${OPENCODE_WARP_AUTO_ROTATE:-}" in
-    1|yes|on|true|True)
-      printf 'opencode-warp: usque is active; automatic WARP rotation is disabled\n' >&2
-      ;;
-  esac
-  case "${OPENCODE_WARP_PLUGIN:-}" in
-    1|yes|on|true|True)
-      printf 'opencode-warp: usque is active; the live WARP rotation plugin is disabled\n' >&2
-      ;;
-  esac
-  export OPENCODE_WARP_AUTO_ROTATE=0
-  export OPENCODE_WARP_PLUGIN=0
+  if [ -z "${OPENCODE_WARP_ROTATE:-}" ]; then
+    if _usque_rotate="$(find_usque_rotate)"; then
+      export OPENCODE_WARP_ROTATE="$_usque_rotate"
+    else
+      printf 'opencode-warp: warning: usque-rotate.sh not found; usque rotation disabled\n' >&2
+      export OPENCODE_WARP_AUTO_ROTATE=0
+      export OPENCODE_WARP_PLUGIN=0
+    fi
+  fi
 fi
 
 AUTO_ROTATE="${OPENCODE_WARP_AUTO_ROTATE:-1}"
@@ -294,11 +311,16 @@ fi
 
 if preflight_needed; then
   ROTATE="$(find_rotate)" || {
-    printf 'opencode-warp: detected a rate limit, but warp-rotate.sh is missing\n' >&2
-    printf '  re-run setup.sh, or set OPENCODE_WARP_AUTO_ROTATE=0 to skip\n' >&2
+    if [ "$USING_USQUE" -eq 1 ]; then
+      printf 'opencode-warp: detected a rate limit, but usque-rotate.sh is missing\n' >&2
+      printf '  re-run usque-setup.sh, or set OPENCODE_WARP_AUTO_ROTATE=0 to skip\n' >&2
+    else
+      printf 'opencode-warp: detected a rate limit, but warp-rotate.sh is missing\n' >&2
+      printf '  re-run setup.sh, or set OPENCODE_WARP_AUTO_ROTATE=0 to skip\n' >&2
+    fi
     exit 1
   }
-  printf 'opencode-warp: rate limit detected in the opencode log; checking WARP\n' >&2
+  printf 'opencode-warp: rate limit detected in the opencode log; checking %s\n' "$INGRESS" >&2
   if [ -n "$requested_model" ]; then
     export PROBE_MODEL="${PROBE_MODEL:-$requested_model}"
   fi
@@ -318,24 +340,24 @@ if preflight_needed; then
   case "$rc" in
     0) ;;
     1)
-      printf 'opencode-warp: WARP recovery did not produce a healthy ingress; starting opencode anyway\n' >&2
+      printf 'opencode-warp: %s recovery did not produce a healthy ingress; starting opencode anyway\n' "$INGRESS" >&2
       [ "${OPENCODE_WARP_ROTATE_STRICT:-0}" = "1" ] && exit 1
       ;;
     *)
       if [ "${OPENCODE_WARP_ROTATE_STRICT:-0}" = "1" ]; then
-        printf 'opencode-warp: could not get a verdict from the WARP ingress (exit %s);\n' "$rc" >&2
+        printf 'opencode-warp: could not get a verdict from the %s ingress (exit %s);\n' "$INGRESS" "$rc" >&2
         printf '  refusing to start because OPENCODE_WARP_ROTATE_STRICT=1.\n' >&2
-        printf '  check: warp-cli status  /  ./probe.sh\n' >&2
+        printf '  check: %s  /  ./probe.sh\n' "$INGRESS_CHECK" >&2
         exit "$rc"
       fi
       if probe; then
-        printf 'opencode-warp: warning: could not get a model verdict through WARP (exit %s),\n' "$rc" >&2
-        printf '  but the WARP proxy itself is reachable; starting opencode anyway.\n' >&2
+        printf 'opencode-warp: warning: could not get a model verdict through %s (exit %s),\n' "$INGRESS" "$rc" >&2
+        printf '  but the %s proxy itself is reachable; starting opencode anyway.\n' "$INGRESS" >&2
         printf '  set OPENCODE_WARP_ROTATE_STRICT=1 to make this fatal.\n' >&2
       else
-        printf 'opencode-warp: could not verify the new ingress and the WARP proxy is\n' >&2
-        printf '  unreachable; refusing to start opencode through a broken WARP path.\n' >&2
-        printf '  check: warp-cli status  /  ./probe.sh\n' >&2
+        printf 'opencode-warp: could not verify the new ingress and the %s proxy is\n' "$INGRESS" >&2
+        printf '  unreachable; refusing to start opencode through a broken %s path.\n' "$INGRESS" >&2
+        printf '  check: %s  /  ./probe.sh\n' "$INGRESS_CHECK" >&2
         exit "$rc"
       fi
       ;;

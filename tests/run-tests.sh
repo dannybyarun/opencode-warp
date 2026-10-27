@@ -387,6 +387,196 @@ run_rotate "1
 0" 3
 check_rc 0 "rotate: throttle, transport, then success recovers across attempts"
 
+# --------------------------------------------------------- usque-rotate.sh
+mkdir -p "$TMP/fakeusquerotate" "$TMP/usque-cache"
+
+# Force the root path so the tests do not need real privileges; the helper's
+# privileged commands are all stubbed below.
+write_fake "$TMP/fakeusquerotate/id" '#!/usr/bin/env bash
+if [ "${1:-}" = "-u" ]; then echo 0; exit 0; fi
+exec /usr/bin/id "$@"'
+
+write_fake "$TMP/fakeusquerotate/systemctl" '#!/usr/bin/env bash
+printf "%s\n" "$*" >>"$USQUETEST_LOG"
+case "${1:-}" in
+  start)
+    [ "${USQUETEST_START_FAIL:-0}" = "1" ] && exit 1
+    exit 0
+    ;;
+  stop) exit 0 ;;
+  *) exit 0 ;;
+esac'
+
+write_fake "$TMP/fakeusquerotate/usque" '#!/usr/bin/env bash
+printf "%s\n" "$*" >>"$USQUETEST_LOG"
+case "$*" in
+  *register*)
+    [ "${USQUETEST_REGISTER_FAIL:-0}" = "1" ] && exit 1
+    n=$(cat "$USQUETEST_ID_SEQ" 2>/dev/null || echo 0)
+    [ -n "$n" ] || n=0
+    n=$((n + 1))
+    printf "%s\n" "$n" >"$USQUETEST_ID_SEQ"
+    id=new
+    [ "$n" -gt 1 ] && id="new$n"
+    [ "${USQUETEST_SAME_ID:-0}" = "1" ] && id=old
+    printf "{\"id\":\"%s\",\"private_key\":\"test\"}\n" "$id" >"$USQUETEST_CONFIG"
+    if [ "${USQUETEST_IP_STATIC:-0}" != "1" ]; then
+      n=$(cat "$USQUETEST_IP_SEQ" 2>/dev/null || echo 0)
+      n=$((n + 1))
+      printf "%s\n" "$n" >"$USQUETEST_IP_SEQ"
+      printf "198.51.100.%s\n" "$n" >"$USQUETEST_EGRESS"
+    fi
+    exit 0
+    ;;
+esac
+exit 0'
+
+write_fake "$TMP/fakeusquerotate/curl" '#!/usr/bin/env bash
+if [ -f "$USQUETEST_EGRESS" ]; then
+  printf "ip=%s\n" "$(cat "$USQUETEST_EGRESS")"
+  echo "warp=on"
+  exit 0
+fi
+exit 1'
+
+write_fake "$TMP/fakeusquerotate-probe" '#!/usr/bin/env bash
+n=$(cat "$PROBE_SEQ" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf "%s\n" "$n" >"$PROBE_SEQ"
+rc=$(sed -n "${n}p" "$PROBE_RCS")
+[ -n "$rc" ] || rc=2
+echo "--- egress (usque) ---"
+echo "ip=198.51.100.${n}"
+echo "loc=US"
+echo "warp=on"
+case "$rc" in
+  0) echo "RESULT: SUCCESS (exit 0) -> PONG" ;;
+  1) echo "RESULT: THROTTLED (exit 1)" ;;
+  3) echo "RESULT: TRANSPORT FAILURE (exit 3)" ;;
+  *) echo "RESULT: NO VERDICT (exit 2)" ;;
+esac
+exit "$rc"'
+
+run_usque_rotate() {
+  local rcs=$1 attempts=${2:-2} static=${3:-0} register_fail=${4:-0} start_fail=${5:-0}
+  shift 5 2>/dev/null || true
+  printf '%s\n' "$rcs" >"$TMP/usque-probe-rcs"
+  : >"$TMP/usque-probe-seq"
+  : >"$TMP/usque.log"
+  rm -rf "$TMP/usque-cache"
+  printf '198.51.100.0\n' >"$TMP/usque-egress"
+  : >"$TMP/usque-ip-seq"
+  : >"$TMP/usque-id-seq"
+  printf '{"id":"old","private_key":"test"}\n' >"$TMP/usque-config"
+  chmod 644 "$TMP/usque-config"
+  PATH="$TMP/fakeusquerotate:$PATH" \
+  XDG_CACHE_HOME="$TMP/usque-cache" \
+  USQUE_CONFIG="$TMP/usque-config" \
+  USQUE_BIN="$TMP/fakeusquerotate/usque" \
+  USQUE_SERVICE="usque-proxy.service" \
+  USQUE_PROXY_PORT=40001 \
+  USQUE_ROTATE_ATTEMPTS="$attempts" \
+  OPENCODE_WARP_PROBE="$TMP/fakeusquerotate-probe" \
+  USQUETEST_LOG="$TMP/usque.log" \
+  USQUETEST_CONFIG="$TMP/usque-config" \
+  USQUETEST_EGRESS="$TMP/usque-egress" \
+  USQUETEST_IP_SEQ="$TMP/usque-ip-seq" \
+  USQUETEST_ID_SEQ="$TMP/usque-id-seq" \
+  USQUETEST_IP_STATIC="$static" \
+  USQUETEST_SAME_ID="${SAME_ID:-0}" \
+  USQUETEST_REGISTER_FAIL="$register_fail" \
+  USQUETEST_START_FAIL="$start_fail" \
+  PROBE_SEQ="$TMP/usque-probe-seq" \
+  PROBE_RCS="$TMP/usque-probe-rcs" \
+    "$ROOT/usque-rotate.sh" "$@" >"$TMP/usque-rotate.stdout" 2>"$TMP/usque-rotate.stderr"
+  RC=$?
+}
+
+run_usque_rotate "0" 2 0 0 0
+check_rc 0 "usque rotate: healthy ingress needs no rotation"
+check_not_contains "$TMP/usque.log" 'register' "usque rotate: healthy ingress leaves the registration alone"
+check_contains "$TMP/usque-rotate.stderr" 'ingress is healthy' "usque rotate: healthy ingress is reported"
+
+run_usque_rotate "1
+0" 2 0 0 0
+check_rc 0 "usque rotate: throttled then healthy recovers"
+check_contains "$TMP/usque.log" 'register' "usque rotate: throttle registers a new account"
+check_contains "$TMP/usque.log" '^stop ' "usque rotate: throttle stops the service"
+check_contains "$TMP/usque.log" '^start ' "usque rotate: throttle starts the service"
+check_contains "$TMP/usque-rotate.stderr" 'recovered: the new ingress passes' "usque rotate: recovery is reported"
+check_contains "$TMP/usque-rotate.stderr" 'new egress IP: 198\.51\.100\.1' "usque rotate: new egress IP is reported"
+check_contains "$TMP/usque-rotate.stderr" 'new ingress \(attempt 1/2\)' "usque rotate: recovered egress is labelled"
+check_contains "$TMP/usque-rotate.stderr" 'ip=198\.51\.100\.2' "usque rotate: recovered egress IP is shown"
+mode=$(stat -c %a "$TMP/usque-config" 2>/dev/null || echo '?')
+if [ "$mode" = "600" ]; then ok "usque rotate: new registration is mode 600"; else bad "usque rotate: expected mode 600, got $mode"; fi
+if ls "$TMP"/usque-config.rotate.* >/dev/null 2>&1; then bad "usque rotate: backup was left behind"; else ok "usque rotate: backup is removed after success"; fi
+
+run_usque_rotate "1
+1
+1" 2 0 0 0
+check_rc 1 "usque rotate: exhausted throttles stays throttled"
+check_contains "$TMP/usque-rotate.stderr" 'current ingress' "usque rotate: initial egress is shown"
+check_contains "$TMP/usque-rotate.stderr" 'ip=198\.51\.100\.1' "usque rotate: initial egress IP is shown"
+check_contains "$TMP/usque-rotate.stderr" 'new ingress \(attempt 1/2\)' "usque rotate: first rotated ingress is labelled"
+check_contains "$TMP/usque-rotate.stderr" 'new ingress \(attempt 2/2\)' "usque rotate: second rotated ingress is labelled"
+count=$(grep -c 'register' "$TMP/usque.log" 2>/dev/null || true)
+if [ "$count" -eq 2 ]; then ok "usque rotate: attempts are bounded"; else bad "usque rotate: expected 2 registrations, got $count"; fi
+
+run_usque_rotate "1
+0" 2 1 0 0
+check_rc 0 "usque rotate: unchanged egress IP still recovers"
+check_contains "$TMP/usque-rotate.stderr" 'egress IP is unchanged' "usque rotate: shared egress IP is explained"
+check_contains "$TMP/usque-rotate.stderr" 'new registration id: new' "usque rotate: new account id is reported"
+
+SAME_ID=1 run_usque_rotate "1" 1 0 0 0
+check_rc 2 "usque rotate: unchanged account id is a hard failure"
+check_contains "$TMP/usque-rotate.stderr" 'registration did not change the usque account id' "usque rotate: unchanged account id is explained"
+check_contains "$TMP/usque-rotate.stderr" 'restored the previous usque registration' "usque rotate: unchanged account id restores the old config"
+
+run_usque_rotate "3
+0" 2 0 0 0
+check_rc 0 "usque rotate: transport failure then healthy recovers"
+check_contains "$TMP/usque-rotate.stderr" 'transport failure through usque; rotating' "usque rotate: transport failure triggers rotation"
+
+run_usque_rotate "2" 2 0 0 0
+check_rc 2 "usque rotate: preflight no verdict stays fatal"
+check_not_contains "$TMP/usque.log" 'register' "usque rotate: no verdict does not rotate"
+
+run_usque_rotate "1
+2" 2 0 0 0
+check_rc 2 "usque rotate: post-rotation no verdict stays fatal"
+check_contains "$TMP/usque-rotate.stderr" 'no verdict after rotation' "usque rotate: post-rotation no verdict is reported"
+
+run_usque_rotate "" 2 0 0 0 --rotate-only
+check_rc 0 "usque rotate-only: changed egress IP succeeds"
+check_contains "$TMP/usque-rotate.stderr" 'rotate-only: replacing the usque registration' "usque rotate-only: mode is reported"
+check_contains "$TMP/usque-rotate.stderr" 'new egress IP: 198\.51\.100\.1' "usque rotate-only: new egress IP is reported"
+if [ -f "$TMP/usque-cache/opencode-warp/last-ok" ]; then ok "usque rotate-only: success records last-ok"; else bad "usque rotate-only: success did not record last-ok"; fi
+if [ -f "$TMP/usque-cache/opencode-warp/last-throttled" ]; then bad "usque rotate-only: success left last-throttled"; else ok "usque rotate-only: success clears last-throttled"; fi
+
+run_usque_rotate "" 1 1 0 0 --rotate-only
+check_rc 0 "usque rotate-only: unchanged egress IP still succeeds"
+check_contains "$TMP/usque-rotate.stderr" 'egress IP is unchanged' "usque rotate-only: shared egress IP is explained"
+
+run_usque_rotate "0" 2 0 0 0 --force
+check_rc 0 "usque rotate: force rotates a healthy ingress"
+check_contains "$TMP/usque.log" 'register' "usque rotate: force registers without probing"
+
+run_usque_rotate "" 1 0 1 0 --rotate-only
+check_rc 2 "usque rotate-only: registration failure is fatal"
+check_contains "$TMP/usque-rotate.stderr" 'usque registration failed' "usque rotate-only: registration failure is reported"
+check_contains "$TMP/usque-rotate.stderr" 'restored the previous usque registration' "usque rotate-only: previous registration is restored"
+check_contains "$TMP/usque-config" '"id":"old"' "usque rotate-only: old config content survives"
+mode=$(stat -c %a "$TMP/usque-config" 2>/dev/null || echo '?')
+if [ "$mode" = "600" ]; then ok "usque rotate-only: restored registration is mode 600"; else bad "usque rotate-only: expected restored mode 600, got $mode"; fi
+check_contains "$TMP/usque.log" '^start ' "usque rotate-only: service is restarted after a failed rotation"
+if ls "$TMP"/usque-config.rotate.* >/dev/null 2>&1; then bad "usque rotate-only: failed rotation left a backup"; else ok "usque rotate-only: failed rotation cleans up its backup"; fi
+
+run_usque_rotate "" 1 0 0 1 --rotate-only
+check_rc 2 "usque rotate-only: service start failure is fatal"
+check_contains "$TMP/usque-rotate.stderr" 'could not start usque-proxy.service after registration' "usque rotate-only: start failure is reported"
+check_contains "$TMP/usque-config" '"id":"old"' "usque rotate-only: start failure restores the old config"
+
 # ----------------------------------------------------------- opencode-warp
 mkdir -p "$TMP/wrap" "$TMP/fakeopencode" "$TMP/fakecurl"
 cp "$ROOT/opencode-warp" "$TMP/wrap/opencode-warp"
@@ -398,6 +588,11 @@ echo "fake rotate rc=$FAKE_ROTATE_RC" >&2
 if [ -n "${ROTATE_ENV_LOG:-}" ]; then
   printf "PROBE_RUN=%s\nPROBE_MODEL=%s\nPROBE_MODE=%s\n" "${PROBE_RUN:-}" "${PROBE_MODEL:-}" "${PROBE_MODE:-}" >"$ROTATE_ENV_LOG"
 fi
+exit "$FAKE_ROTATE_RC"'
+
+# usque selection points the wrapper and the live plugin at this helper.
+write_fake "$TMP/wrap/usque-rotate.sh" '#!/usr/bin/env bash
+echo "fake usque rotate rc=$FAKE_ROTATE_RC" >&2
 exit "$FAKE_ROTATE_RC"'
 
 write_fake "$TMP/fakeopencode/opencode" '#!/usr/bin/env bash
@@ -415,6 +610,7 @@ esac
 printf "HTTPS_PROXY=%s\n" "${HTTPS_PROXY:-}" >>"$OPENCODE_CALL_LOG"
 printf "AUTO_ROTATE=%s\n" "${OPENCODE_WARP_AUTO_ROTATE:-}" >>"$OPENCODE_CALL_LOG"
 printf "PLUGIN=%s\n" "${OPENCODE_WARP_PLUGIN:-}" >>"$OPENCODE_CALL_LOG"
+printf "ROTATE=%s\n" "${OPENCODE_WARP_ROTATE:-}" >>"$OPENCODE_CALL_LOG"
 printf "ARGS=%s\n" "$*" >>"$OPENCODE_CALL_LOG"
 echo "FAKE_OPENCODE_OK"
 exit 0'
@@ -440,7 +636,11 @@ run_wrapper() {
   HTTPS_PROXY="" HTTP_PROXY="" https_proxy="" http_proxy="" \
   NO_PROXY="" no_proxy="" \
   PROBE_RUN="" PROBE_MODEL="" \
+  WARP_PROXY_PORT="" \
   OPENCODE_WARP_USQUE=0 \
+  OPENCODE_WARP_ROTATE="" \
+  OPENCODE_WARP_AUTO_ROTATE="" \
+  OPENCODE_WARP_PLUGIN="" \
   OPENCODE_WARP_FORCE_PROBE="${FORCE_PROBE:-1}" \
   OPENCODE_WARP_LOG="${LOG_PATH:-}" \
   OPENCODE_WARP_ROTATE_STRICT="$strict" \
@@ -479,7 +679,11 @@ exit 1'
   HTTPS_PROXY="" HTTP_PROXY="" https_proxy="" http_proxy="" \
   NO_PROXY="" no_proxy="" \
   PROBE_RUN="" PROBE_MODEL="" \
+  WARP_PROXY_PORT="" \
   OPENCODE_WARP_USQUE=1 \
+  OPENCODE_WARP_ROTATE="" \
+  OPENCODE_WARP_AUTO_ROTATE="" \
+  OPENCODE_WARP_PLUGIN="" \
   OPENCODE_WARP_FORCE_PROBE=0 \
   OPENCODE_WARP_LOG="" \
   OPENCODE_WARP_ROTATE_STRICT=0 \
@@ -504,8 +708,9 @@ check_contains "$TMP/rotate-env.log" '^PROBE_MODEL=opencode/deepseek-v4.1-flash-
 run_wrapper_usque
 check_rc 0 "wrapper: usque auto-detection starts opencode"
 check_contains "$TMP/opencode.log" 'HTTPS_PROXY=http://127.0.0.1:40001' "wrapper: usque proxy is selected"
-check_contains "$TMP/opencode.log" '^AUTO_ROTATE=0$' "wrapper: usque disables official rotation"
-check_contains "$TMP/opencode.log" '^PLUGIN=0$' "wrapper: usque disables the live rotation plugin"
+check_contains "$TMP/opencode.log" '^ROTATE=.*/usque-rotate\.sh$' "wrapper: usque rotation uses its own helper"
+check_not_contains "$TMP/opencode.log" '^AUTO_ROTATE=0$' "wrapper: usque keeps automatic rotation enabled"
+check_not_contains "$TMP/opencode.log" '^PLUGIN=0$' "wrapper: usque keeps the live rotation plugin enabled"
 check_contains "$TMP/opencode.log" 'ARGS=.*standalone' "wrapper: usque still injects --standalone"
 
 run_wrapper 0 "0" 0 run -m openrouter/some-free-model "hi"
@@ -598,8 +803,14 @@ bash -n "$ROOT/usque-setup.sh"
 check_rc 0 "usque: installer parses"
 bash -n "$ROOT/opencode-usque"
 check_rc 0 "usque: wrapper parses"
+bash -n "$ROOT/usque-rotate.sh"
+check_rc 0 "usque: rotation helper parses"
 check_contains "$ROOT/usque-setup.sh" 'sha256sum' "usque: installer verifies the checksum"
+check_contains "$ROOT/usque-setup.sh" 'usque-rotate\.sh' "usque: installer installs the rotation helper"
+check_contains "$ROOT/usque-setup.sh" 'ROTATE=.*usque-rotate\.sh' "usque: installer tracks the rotation helper path"
 check_contains "$ROOT/usque-proxy.service.in" '@USQUE_PORT@' "usque: service template is parameterized"
+check_not_contains "$ROOT/opencode-usque" 'OPENCODE_WARP_AUTO_ROTATE=0' "usque: wrapper keeps automatic rotation enabled"
+check_not_contains "$ROOT/opencode-usque" 'OPENCODE_WARP_PLUGIN=0' "usque: wrapper keeps the live plugin enabled"
 
 # ------------------------------------------------------------------ summary
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
