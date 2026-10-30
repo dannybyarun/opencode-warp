@@ -115,8 +115,9 @@ function Write-Egress {
   }
 }
 
-# Print the plugin log's unblock estimate when it has a fresh 429. This is
-# best-effort: the verdict never depends on the log file.
+# Print the plugin log's unblock estimate when its deadline is still in the
+# future. An old 429 must not make a current probe look like it has a live
+# retry-after. This is best-effort: the verdict never depends on the log file.
 function Write-LogHint {
   if (-not (Test-Path -LiteralPath $log -PathType Leaf)) { return }
 
@@ -133,19 +134,22 @@ function Write-LogHint {
       }
     }
     if ($last) {
+      $deadline = $null
       if ($last.ts) {
         try {
           $at = [DateTimeOffset]::Parse([string]$last.ts, [Globalization.CultureInfo]::InvariantCulture)
           $delay = 0
           if ($last.parsedDelayMs) { $delay = [double]$last.parsedDelayMs }
-          $deadline = $at.AddMilliseconds($delay).UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss 'UTC'")
-          Write-Output "  unblocks   : $deadline"
+          $deadline = $at.AddMilliseconds($delay).UtcDateTime
         } catch {
           # no unblock estimate
         }
       }
-      if ($last.headers -and $last.headers.'cf-ray') {
-        Write-Output ("  cf-ray     : " + $last.headers.'cf-ray')
+      if ($deadline -and $deadline -gt [DateTime]::UtcNow) {
+        Write-Output ("  unblocks   : " + $deadline.ToString("yyyy-MM-dd HH:mm:ss 'UTC'"))
+        if ($last.headers -and $last.headers.'cf-ray') {
+          Write-Output ("  cf-ray     : " + $last.headers.'cf-ray')
+        }
       }
     }
   } catch {

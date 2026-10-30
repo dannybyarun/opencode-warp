@@ -106,8 +106,9 @@ print_egress() {
   fi
 }
 
-# Print the plugin log's unblock estimate when it has a fresh 429. This is
-# best-effort: the verdict never depends on the log file.
+# Print the plugin log's unblock estimate when its deadline is still in the
+# future. An old 429 must not make a current probe look like it has a live
+# retry-after. This is best-effort: the verdict never depends on the log file.
 print_log_hint() {
   [ -f "$LOG" ] || return 0
   python3 - "$LOG" <<'PY' 2>/dev/null || true
@@ -117,14 +118,16 @@ hits = [o for o in rows if o.get('event') == 'http.response.429']
 if hits:
     r = hits[-1]
     h = r.get('headers') or {}
+    deadline = None
     try:
         ts = datetime.datetime.strptime(r['ts'], '%Y-%m-%dT%H:%M:%S.%fZ')
         deadline = ts + datetime.timedelta(milliseconds=r.get('parsedDelayMs') or 0)
-        print("  unblocks   :", deadline.strftime('%Y-%m-%d %H:%M:%S UTC'))
     except Exception:
         pass
-    if h.get('cf-ray'):
-        print("  cf-ray     :", h.get('cf-ray'))
+    if deadline and deadline > datetime.datetime.utcnow():
+        print("  unblocks   :", deadline.strftime('%Y-%m-%d %H:%M:%S UTC'))
+        if h.get('cf-ray'):
+            print("  cf-ray     :", h.get('cf-ray'))
 PY
 }
 

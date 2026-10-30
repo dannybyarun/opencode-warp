@@ -440,7 +440,9 @@ session that has already exhausted its retries can still fail.
 The plugin appends its decisions to
 `~/.local/share/opencode/ratelimit-retry.jsonl` (`OPENCODE_RATELIMIT_LOG`
 overrides the path). The file records every observed 429 with `retry-after` /
-`cf-ray`, plus each rotation attempt and its outcome.
+`cf-ray`, plus each rotation attempt and its outcome. The probe only reuses a
+log entry whose unblock deadline is still in the future, so an old 429 cannot
+add a stale countdown to a current probe.
 
 | Variable | Meaning |
 |---|---|
@@ -489,14 +491,20 @@ CLI supports it.
 
 ### What it still cannot do
 
-- **It does not make you immune to rate limits.** The free tier enforces a
-  **per-model** daily quota that resets at **00:00 UTC**. The bucket is also
-  tied to the network/egress, and VPN/proxy ranges can be pre-flagged. A new
-  WARP registration changes the IP and WARP account, but it does not reset a
-  per-model bucket. On 2026-10-26, DeepSeek/GLM/MiMo/Big Pickle were 429
-  through WARP while Nemotron/Beam were 200 on the same egress. DeepSeek, GLM,
-  Nemotron, and Beam were all 200 direct. If a 429 survives one rotation,
-  switch models with `/models` or use direct egress instead of rotating again.
+- **It does not make you immune to rate limits.** The free allowance resets at
+  **00:00 UTC** and is tied to the account/workspace and network/egress;
+  VPN/proxy ranges can be pre-flagged. A new WARP registration changes the IP
+  and WARP account, but it does not reset a spent allowance. On 2026-10-26,
+  DeepSeek/GLM/MiMo/Big Pickle were 429 through WARP while Nemotron/Beam were
+  200 on the same egress, and all four tested models were 200 direct. On
+  2026-10-30, after the reset, DeepSeek, Nemotron, and Beam were all 429 on
+  both WARP and direct egress. The free-tier policy is not stable: if a 429
+  survives one rotation and a model switch, wait for the reset, try direct
+  egress if it still works, or use a paid/Go/BYOK provider.
+- **Tor bridges do not reset the quota.** obfs4 bridges hide that you are
+  using Tor from your local network and DPI, but the destination still sees a
+  public Tor exit IP. The limit is tied to the account/network and model, not
+  the entry point, so a bridge is not a rate-limit workaround.
 - **The raw endpoint is not a reliable quota probe for free models.** The
   hosted endpoint now gates free models on the real OpenCode client; a bare
   `Authorization: Bearer public` request with a minimal body can return
@@ -558,11 +566,23 @@ license, and egress IP (`2a09:bac1:76a0:dba8::4ff:21` →
 fresh OpenCode project and session on a Tor exit also returned 429. So the
 quota is not keyed only by IP, project, or session.
 
-The current service appears to enforce a **per-model free bucket tied to the
-egress/network**, with VPN/proxy ranges pre-flagged for the popular models.
-WARP's range is flagged for DeepSeek/GLM/MiMo/Big Pickle but not for
-Nemotron/Beam. Direct egress still has a fresh bucket for the tested models.
+The 2026-10-26 service appeared to enforce a **per-model free bucket tied to
+the egress/network**, with VPN/proxy ranges pre-flagged for the popular models.
+WARP's range was flagged for DeepSeek/GLM/MiMo/Big Pickle but not for
+Nemotron/Beam. Direct egress still had a fresh bucket for the tested models.
 `Retry-After` pointed at the 00:00 UTC reset.
+
+**Follow-up (2026-10-30).** After the reset, the free allowance was spent
+again for this environment: DeepSeek, Nemotron, and Beam all returned 429 on
+both WARP (`2a09:bac5:b044:119::1c:2fc`) and direct (`34.105.80.217`) egress.
+The live API returned `Retry-After: 13765` (the next 00:00 UTC), and OpenCode
+2's message was `Free usage limit reached. Connect a provider or subscribe to
+OpenCode Go to keep going, or switch models.` OpenCode support has said the
+allowance can apply per account, workspace, and network. So the per-model
+matrix above is a snapshot of one policy state, not a guarantee that another
+free model or a new exit will have quota. Tor bridges
+are especially irrelevant here: obfs4 only obfuscates the entry into the Tor
+network, while the destination still sees a public Tor exit relay.
 
 **The raw API probe is not a drop-in stand-in for the client.** At the same
 time `opencode run` returned `PONG` on direct egress, a minimal `curl` (and a
@@ -632,7 +652,7 @@ startup policy, and the `serve`/`--server` argument routing. The Windows suite
 also checks profile install/remove behaviour, the `.cmd` shims, and rejects
 PowerShell 7-only syntax.
 
-Expected totals: **185** Linux checks and **187** Windows checks.
+Expected totals: **190** Linux checks and **192** Windows checks.
 
 ---
 

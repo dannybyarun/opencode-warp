@@ -336,7 +336,8 @@ function Invoke-ProbeApi {
     [string]$Status = "200",
     [int]$CurlRc = 0,
     [string]$Body = "",
-    [string]$Mode = "api"
+    [string]$Mode = "api",
+    [string]$Log = (Join-Path $Tmp "missing-ratelimit.jsonl")
   )
   $out = Join-Path $Tmp ("probe-api-" + [Guid]::NewGuid().ToString("N") + ".out")
   return Invoke-Child -Script $probe -Environment @{
@@ -349,7 +350,7 @@ function Invoke-ProbeApi {
     PROBE_DIRECT             = "1"
     OPENCODE_WARP_CURL       = $apiCurlMock
     OPENCODE_WARP_POWERSHELL = $PS
-    OPENCODE_RATELIMIT_LOG   = (Join-Path $Tmp "missing-ratelimit.jsonl")
+    OPENCODE_RATELIMIT_LOG   = $Log
     API_STATUS               = $Status
     API_BODY                 = $Body
     API_RC                   = [string]$CurlRc
@@ -370,6 +371,23 @@ Check-Contains $result.Out "RESULT: THROTTLED" "probe api: throttled verdict pri
 Check-Contains $result.Out "HTTP 429" "probe api: HTTP status is reported"
 Check-Contains $result.Out "unblocks" "probe api: retry-after is decoded"
 Check-Contains $result.Out "test-ray" "probe api: cf-ray is reported"
+
+# A plugin-log 429 whose deadline has passed must not add a stale hint to a
+# current probe. A still-active deadline is useful and should be shown.
+$staleLog = Join-Path $Tmp "ratelimit-stale.jsonl"
+[IO.File]::WriteAllText($staleLog, '{"ts":"2026-10-26T17:14:00.914Z","event":"http.response.429","headers":{"retry-after":"24360","cf-ray":"stale-ray"},"parsedDelayMs":24360000}' + "`n")
+$result = Invoke-ProbeApi -Status "429" -Body '{"error":{"type":"FreeUsageLimitError","message":"Free usage limit reached."}}' -Log $staleLog
+Check-Rc 1 "probe api: stale log does not change the verdict" $result
+Check-NotContains $result.Out "stale-ray" "probe api: stale log cf-ray is ignored"
+Check-NotContains $result.Out "2026-10-27" "probe api: stale log deadline is ignored"
+
+$freshLog = Join-Path $Tmp "ratelimit-fresh.jsonl"
+$freshTs = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+$freshJson = '{"ts":"' + $freshTs + '","event":"http.response.429","headers":{"retry-after":"3600","cf-ray":"fresh-ray"},"parsedDelayMs":3600000}'
+[IO.File]::WriteAllText($freshLog, $freshJson + "`n")
+$result = Invoke-ProbeApi -Status "429" -Body '{"error":{"type":"FreeUsageLimitError","message":"Free usage limit reached."}}' -Log $freshLog
+Check-Rc 1 "probe api: fresh log does not change the verdict" $result
+Check-Contains $result.Out "fresh-ray" "probe api: fresh log cf-ray is shown"
 
 $result = Invoke-ProbeApi -Status "403" -Body '{"error":{"message":"You have used today''s free messages."}}'
 Check-Rc 1 "probe api: free-messages wording is throttled" $result

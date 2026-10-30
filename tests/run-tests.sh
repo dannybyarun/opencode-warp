@@ -176,7 +176,7 @@ body=$(sed -n "${n}p" "$API_BODY" 2>/dev/null)
 exit "$rc"'
 
 run_probe_api() {
-  local status=$1 rc=$2 body=$3 timeout=${4:-20} mode=${5:-api}
+  local status=$1 rc=$2 body=$3 timeout=${4:-20} mode=${5:-api} log=${6:-$TMP/missing-ratelimit.jsonl}
   printf '%s\n' "$status" >"$TMP/api-status"
   printf '%s\n' "$rc" >"$TMP/api-rc"
   printf '%s\n' "$body" >"$TMP/api-body"
@@ -188,7 +188,7 @@ run_probe_api() {
   PROBE_OUT="$TMP/probe-api.out" \
   PROBE_TIMEOUT="$timeout" \
   PROXY="" \
-  OPENCODE_RATELIMIT_LOG="$TMP/missing-ratelimit.jsonl" \
+  OPENCODE_RATELIMIT_LOG="$log" \
   API_SEQ="$TMP/api-seq" \
   API_STATUS="$TMP/api-status" \
   API_RC="$TMP/api-rc" \
@@ -212,6 +212,22 @@ check_contains "$TMP/probe.stdout" 'HTTP 429' "probe api: HTTP status is reporte
 check_contains "$TMP/probe.stdout" 'unblocks' "probe api: retry-after is decoded"
 check_contains "$TMP/probe.stdout" 'test-ray' "probe api: cf-ray is reported"
 check_contains "$TMP/probe.stdout" 'FreeUsageLimitError: Free usage limit reached' "probe api: the limit wording is reported"
+
+# A plugin-log 429 whose deadline has passed must not add a stale hint to a
+# current probe. A still-active deadline is useful and should be shown.
+cat >"$TMP/ratelimit-stale.jsonl" <<'EOF'
+{"ts":"2026-10-26T17:14:00.914Z","event":"http.response.429","headers":{"retry-after":"24360","cf-ray":"stale-ray"},"parsedDelayMs":24360000}
+EOF
+run_probe_api 429 0 '{"error":{"type":"FreeUsageLimitError","message":"Free usage limit reached."}}' 20 api "$TMP/ratelimit-stale.jsonl"
+check_rc 1 "probe api: stale log does not change the verdict"
+check_not_contains "$TMP/probe.stdout" 'stale-ray' "probe api: stale log cf-ray is ignored"
+check_not_contains "$TMP/probe.stdout" '2026-10-27' "probe api: stale log deadline is ignored"
+
+now_ts="$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')"
+printf '{"ts":"%s","event":"http.response.429","headers":{"retry-after":"3600","cf-ray":"fresh-ray"},"parsedDelayMs":3600000}\n' "$now_ts" >"$TMP/ratelimit-fresh.jsonl"
+run_probe_api 429 0 '{"error":{"type":"FreeUsageLimitError","message":"Free usage limit reached."}}' 20 api "$TMP/ratelimit-fresh.jsonl"
+check_rc 1 "probe api: fresh log does not change the verdict"
+check_contains "$TMP/probe.stdout" 'fresh-ray' "probe api: fresh log cf-ray is shown"
 
 run_probe_api 403 0 '{"error":{"message":"You have used today'"'"'s free messages."}}'
 check_rc 1 "probe api: free-messages wording is throttled"
